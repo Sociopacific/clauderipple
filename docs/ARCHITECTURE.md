@@ -48,6 +48,32 @@ Why this path is stable:
 
 ## 2. What the app does with the official third-party setting (why competitors lose)
 
+### Subscription Fast requests (verified 2026-10-03)
+
+ChatGPT provider `serviceTier: "fast"` is opt-in and emits `service_tier: "priority"`,
+the Fast id advertised by the account's Codex model catalogue. The subscription
+endpoint rejects the literal `fast` wire value. Model, reasoning effort and cache
+identity are unchanged. `response.completed.response.service_tier` is logged;
+when priority was requested but not confirmed, the router warns rather than
+claiming Fast processing. A live GPT 6.1 Sol probe returned `default`, including
+with the installed Codex client's request metadata, so accelerated execution on
+this account is not yet verified. The Fast picker entry requests priority; it
+cannot force the backend's scheduling decision.
+
+### Local Auto mode classifier override (verified 2026-10-01)
+
+Desktop's Claude Code 2.1.284 registers `CLAUDE_CODE_AUTO_MODE_MODEL` but ignores it
+in actual security-monitor requests. The opt-in `autoModeClassifier: {provider,
+model, effort}` config targets only tool-free requests whose system text block
+starts with `You are a security monitor for autonomous AI coding agents.`.
+Conversation text and routing markers cannot select this target. The original
+security rules, context, output format and engine decision logic are preserved.
+Both native classification stages were exercised through the Codex subscription
+on `gpt-6-luna` at `low`: an authorized disposable file write executed; deletion
+explicitly forbidden by the user was denied and the file survived. Ordinary
+model routing is unchanged. Removing the config restores native classification.
+This is a local patch; an upstream reinstall can replace it.
+
 Verified in `app.asar` (`.vite/build/index.chunk-C0sgyfNn.js`, `-2CuMdv3h.js`):
 
 - The gateway setting (`inferenceGatewayBaseUrl`) is a **whole-app deployment
@@ -272,6 +298,12 @@ chat is out of reach for every approach, ours included.
     old or on `?refresh=1`, shares one in-flight lookup, and marks the answer
     `stale: true` with a reason when the lookup fails rather than hiding the old
     value. Once at startup too, after `listen()`, never awaited.
+    Credit metadata is retained from usage, headers, and events. A positive balance or unlimited
+    credits keeps an account eligible after included windows reach 100%; snapshots omitting
+    credits retain the previous credit metadata. Boolean headers are case-insensitive. The live
+    backend can report `has_credits=false` with a positive balance, so balance also permits admission.
+    Explicit overage exhaustion still blocks locally, and real upstream 429 responses retain
+    their ordinary cooldown behavior. Verified 2026-10-04 with 62,500 credits after weekly exhaustion.
   - **Several accounts (2026-09-24, `chatgpt/accounts.ts`).** Behaviour taken
     as a spec from opencodex's Codex account pool (no code). `clauderipple
     login` adds an account; the authorize URL carries `prompt=login` and
@@ -874,3 +906,15 @@ CC BY-NC-ND (no forks, no sponsors). CLI-targeting `claude-code-router` has
 37,180★, `opencodex` 14,300★ with two README sponsors. Open positions: English
 distribution, GPL-3.0 license (chosen 2026-09-13 over MIT: sole author, reversible later, blocks closed commercial repackaging), sponsor slots. Positioning: an **add-on for Claude
 subscribers**, not a replacement for people without one.
+
+
+### Codex context-overflow recovery (verified 2026-10-01)
+
+The subscription backend can reject an oversized request with HTTP 200 followed by
+`response.failed` / `context_length_exceeded`. The Messages adapter maps this to
+`invalid_request_error` and prefixes `prompt is too long`, the phrase recognized by
+Desktop CLI 2.1.284. Keep early SSE events pending until actual content arrives so
+an early failure is returned as HTTP 400. Transient overloads and interrupted
+streams remain retryable; never turn a rejection into a successful empty answer.
+Both streaming and non-streaming rejection paths are covered by adapter tests.
+A session still needs successful native compaction before work is restored.

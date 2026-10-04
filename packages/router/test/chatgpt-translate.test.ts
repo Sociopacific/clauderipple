@@ -333,3 +333,15 @@ test("tool result images are delivered as vision input after the function output
   assert.deepEqual((r.input[2] as { content: unknown[] }).content, [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }]);
   assert.equal(JSON.stringify(r.input).includes("[image omitted]"), false);
 });
+
+
+test("Fast processing is opt-in and preserves the model and reasoning effort", () => {
+  const regular = toResponsesRequest(turn1, opts);
+  const fast = toResponsesRequest(turn1, { ...opts, serviceTier: "fast" });
+  assert.equal(regular.service_tier, undefined);
+  assert.equal(fast.service_tier, "priority");
+  assert.equal(toResponsesRequest(turn1, { ...opts, serviceTier: "priority" }).service_tier, "priority");
+  assert.equal(fast.model, regular.model);
+  assert.deepEqual(fast.reasoning, regular.reasoning);
+  assert.equal(fast.prompt_cache_key, regular.prompt_cache_key);
+});

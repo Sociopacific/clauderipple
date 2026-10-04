@@ -114,6 +114,11 @@ export function rateLimitsFromHeaders(h: Headers): Record<string, unknown> | nul
     type: "codex.rate_limits",
     plan_type: h.get("x-codex-plan-type") ?? undefined,
     rate_limits: { primary, secondary: secondary && secondary.window_minutes ? secondary : null },
+    ...(h.has("x-codex-credits-has-credits") ? { credits: {
+      has_credits: h.get("x-codex-credits-has-credits")?.toLowerCase() === "true",
+      unlimited: h.get("x-codex-credits-unlimited")?.toLowerCase() === "true",
+      balance: h.get("x-codex-credits-balance"),
+    } } : {}),
     at: Date.now(),
   };
 }
@@ -129,6 +134,7 @@ export function rateLimitsFromHeaders(h: Headers): Record<string, unknown> | nul
 export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | null {
   const b = body as {
     plan_type?: unknown;
+    credits?: { has_credits?: boolean; unlimited?: boolean; overage_limit_reached?: boolean; balance?: string | number | null } | null;
     rate_limit?: {
       primary_window?: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null;
       secondary_window?: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null;
@@ -150,6 +156,7 @@ export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | nu
     type: "codex.rate_limits",
     plan_type: typeof b?.plan_type === "string" ? b.plan_type : undefined,
     rate_limits: { primary, secondary: secondary && secondary.window_minutes ? secondary : null },
+    ...(b?.credits ? { credits: b.credits } : {}),
     at: Date.now(),
   };
 }
@@ -202,6 +209,12 @@ function windowResetMs(w: Window, now: number): number | undefined {
  * is full — the account is not out, whatever else the snapshot says.
  */
 export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefined, now = Date.now()): number | undefined {
+  const credits = snapshot?.credits as { has_credits?: boolean; unlimited?: boolean; overage_limit_reached?: boolean; balance?: unknown } | undefined;
+  // The live backend can report has_credits=false alongside a positive spendable balance.
+  // Let the server decide admission when credits remain; a genuine HTTP 429 still cools the pool.
+  if (credits?.overage_limit_reached !== true && (credits?.unlimited === true ||
+      (credits?.balance != null && Number.isFinite(Number(credits.balance)) && Number(credits.balance) > 0) ||
+      (credits?.has_credits === true && credits.balance == null))) return undefined;
   const limits = (snapshot?.rate_limits ?? null) as { primary?: Window | null; secondary?: Window | null } | null;
   let out: number | undefined;
   for (const w of [limits?.primary, limits?.secondary]) {
@@ -268,8 +281,12 @@ export class ChatGptAdapter {
   /** Record a snapshot for an account; a full window takes it out of rotation until that window resets. */
   private noteRateLimits(credential: ChatGptCredential, snapshot: Record<string, unknown> | null): void {
     if (!snapshot) return;
-    this.rateLimitsByAccount.set(credential.ownerId, snapshot);
-    const outMs = exhaustedForMs(snapshot);
+    // Header/event snapshots can omit credits; absence must not erase the usage response's balance.
+    const previous = this.rateLimitsByAccount.get(credential.ownerId);
+    const merged = snapshot.credits === undefined && previous?.credits !== undefined
+      ? { ...snapshot, credits: previous.credits } : snapshot;
+    this.rateLimitsByAccount.set(credential.ownerId, merged);
+    const outMs = exhaustedForMs(merged);
     if (outMs !== undefined) this.pool.penalise(this.name, credential.id, 429, outMs);
   }
 
@@ -958,6 +975,7 @@ export class ChatGptAdapter {
       model,
       effort: effort ?? this.cfg.defaultEffort ?? "high",
       identity: this.cfg.identity ?? true,
+      ...(this.cfg.serviceTier ? { serviceTier: this.cfg.serviceTier } : {}),
       ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
     });
     const body = JSON.stringify(upstreamReq);
@@ -1036,11 +1054,22 @@ export class ChatGptAdapter {
     let bytes = 0;
     let ping: NodeJS.Timeout | null = null;
 
+    // Keep early rejection as an HTTP error until an actual content block arrives.
+    // A 200 followed by an error loses the status Claude uses for overflow recovery.
+    const pendingEvents: ReturnType<StreamMapper["start"]> = [];
+    const sendEvents = (events: ReturnType<StreamMapper["start"]>): void => {
+      if (!wantStream) return;
+      pendingEvents.push(...events);
+      if (!res.headersSent) {
+        if (mapper.failure?.type === "invalid_request_error") return;
+        if (!pendingEvents.some((e) => e.event !== "message_start")) return;
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      }
+      for (const ev of pendingEvents.splice(0)) bytes += write(res, formatSse(ev));
+    };
     if (wantStream) {
-      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-      for (const ev of mapper.start()) bytes += write(res, formatSse(ev));
       ping = setInterval(() => {
-        if (!res.writableEnded) bytes += write(res, formatSse({ event: "ping", data: { type: "ping" } }));
+        if (res.headersSent && !res.writableEnded) bytes += write(res, formatSse({ event: "ping", data: { type: "ping" } }));
       }, PING_MS);
     }
 
@@ -1051,10 +1080,21 @@ export class ChatGptAdapter {
         const { done, value } = await reader.read();
         if (done) break;
         for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
+          if (this.cfg.serviceTier && ev.type === "response.completed") {
+            const response = ev.response as { service_tier?: string } | undefined;
+            const requested = upstreamReq.service_tier;
+            const actual = response?.service_tier;
+            const detail = `chatgpt ${this.name}: service_tier requested=${requested} actual=${actual ?? "unreported"}`;
+            if (requested === "priority" && actual !== "priority" && actual !== "fast") {
+              this.log.warn(`${detail}; Fast was not confirmed by the backend`);
+            } else {
+              this.log.info(detail);
+            }
+          }
           const outEvents = mapper.feed(ev);
           if (mapper.rateLimits && mapper.rateLimits !== this.rateLimitsByAccount.get(credential.ownerId)) this.noteRateLimits(credential, mapper.rateLimits);
           this.rememberInput(cacheKey, mapper.usage);
-          if (wantStream) for (const o of outEvents) bytes += write(res, formatSse(o));
+          sendEvents(outEvents);
           if (mapper.isFinished) break;
         }
         if (mapper.isFinished) break;
@@ -1066,12 +1106,12 @@ export class ChatGptAdapter {
         const tail = parser.sawDone
           ? mapper.finish()
           : mapper.fail(`${model}: upstream stream ended before the response completed`, "server_is_overloaded");
-        if (wantStream) for (const o of tail) bytes += write(res, formatSse(o));
+        sendEvents(tail);
       }
     } catch (e) {
       if (!ac.signal.aborted) {
         const tail = mapper.fail(`stream interrupted: ${(e as Error).message}`, "server_is_overloaded");
-        if (wantStream) for (const o of tail) bytes += write(res, formatSse(o));
+        sendEvents(tail);
       }
     } finally {
       if (ping) clearInterval(ping);
@@ -1084,8 +1124,8 @@ export class ChatGptAdapter {
     }
 
     const failure = mapper.failure;
-    const failedStatus = failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
-    if (!wantStream) {
+    const failedStatus = failure?.type === "invalid_request_error" ? 400 : failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
+    if (!wantStream || (failure && !res.headersSent)) {
       // A failed turn is an error here too, not a 200 carrying whatever arrived before it failed.
       const msg = failure ? anthropicError(failedStatus, failure.type, failure.message).body : JSON.stringify(mapper.message());
       res.writeHead(failure ? failedStatus : 200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(msg)) }).end(msg);

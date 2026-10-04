@@ -123,6 +123,16 @@ async function roundTrip(
   return { seen, seenBody, records, clientStatus, clientBody, providerCalls };
 }
 
+test("an anthropic-compatible request does not leak Anthropic safeguards to its provider", async () => {
+  const r = await roundTrip({ "x-api-key": "K" }, OK_REPLY, {
+    provider: { type: "anthropic-compatible" },
+    body: { safeguards: [{ type: "dangerous_tool_use", classifier_context: "test" }] },
+  });
+  assert.equal(r.clientStatus, 200);
+  assert.equal(r.providerCalls, 1);
+  assert.equal("safeguards" in r.seenBody, false);
+});
+
 test("an x-api-key provider never receives the caller's authorization header", async () => {
   const seen = await forwardedHeaders({ "x-api-key": "PROVIDER-KEY" });
   assert.equal(seen["x-api-key"], "PROVIDER-KEY");

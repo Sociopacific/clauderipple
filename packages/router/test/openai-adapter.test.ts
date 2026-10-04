@@ -236,6 +236,23 @@ test("cleanup", () => {
 // A 403 is often about what the account may do rather than about the credential. Calling it an
 // authentication error sends the user back to a key that was never the problem — which is how an
 // OpenCode Go data-policy refusal read as a bad key.
+test("context overflow is recognizable by Claude Code without relabeling unrelated errors", () => {
+  for (const text of [
+    JSON.stringify({ error: { message: JSON.stringify({ message: "The input is longer than the model's context length", type: "invalid_request_error" }) } }),
+    JSON.stringify({ error: { code: "context_length_exceeded", message: "Request rejected" } }),
+    JSON.stringify({ message: "Input exceeds the context window" }),
+  ]) {
+    const result = mapHttpError(400, text);
+    assert.equal(result.status, 400);
+    const body = JSON.parse(result.body);
+    assert.equal(body.error.type, "invalid_request_error");
+    assert.match(body.error.message, /^prompt is too long:/);
+  }
+  const unrelated = JSON.parse(mapHttpError(400, JSON.stringify({ error: { message: "Invalid JSON schema: string exceeds maximum length" } })).body);
+  assert.doesNotMatch(unrelated.error.message, /prompt is too long/);
+  assert.equal(mapHttpError(429, "context_length_exceeded").status, 429);
+});
+
 test("a 403 that is not about the credential is a permission error, not an auth error", async () => {
   const policy = mapHttpError(403, JSON.stringify({ error: { type: "DataPolicyError", message: "This model collects data used to improve its quality and requires explicit opt in" } }));
   assert.equal(policy.status, 403);

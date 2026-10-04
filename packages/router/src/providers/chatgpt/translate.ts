@@ -57,11 +57,13 @@ export type ResponsesRequest = {
   store: false;
   stream: true;
   prompt_cache_key: string;
+  service_tier?: "default" | "fast" | "priority";
   /** Who this turn belongs to, in the shape the Codex CLI sends — see `conversationId`. */
   client_metadata: { session_id: string; thread_id: string; turn_id: string; "x-codex-window-id": string };
 };
 
 export type TranslateOptions = {
+  serviceTier?: "default" | "fast" | "priority";
   model: string;
   effort: string;
   identity: boolean;
@@ -342,6 +344,8 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     store: false,
     stream: true,
     prompt_cache_key: conversationId(req),
+    // The subscription endpoint uses the catalogue's Fast id, not the UI name.
+    ...(opts.serviceTier ? { service_tier: opts.serviceTier === "fast" ? "priority" : opts.serviceTier } : {}),
     client_metadata: { session_id: conversationId(req), thread_id: conversationId(req), turn_id: crypto.randomUUID(), "x-codex-window-id": `${conversationId(req)}:0` },
   };
   if (tools.length > 0) {
@@ -559,7 +563,9 @@ export class StreamMapper {
   fail(message: string, code?: string): AnthropicEvent[] {
     if (this.finished) return [];
     this.finished = true;
-    const type = code === "server_is_overloaded" ? "overloaded_error" : code === "rate_limit_exceeded" || code === "usage_limit_reached" ? "rate_limit_error" : "api_error";
+    const contextOverflow = code === "context_length_exceeded" || /input exceeds the context window/i.test(message);
+    const type = contextOverflow ? "invalid_request_error" : code === "server_is_overloaded" ? "overloaded_error" : code === "rate_limit_exceeded" || code === "usage_limit_reached" ? "rate_limit_error" : "api_error";
+    if (contextOverflow) message = `prompt is too long: ${message}`;
     this.failure = { type, message };
     return [...this.start(), ...this.closeBlock(), { event: "error", data: { type: "error", error: { type, message } } }];
   }

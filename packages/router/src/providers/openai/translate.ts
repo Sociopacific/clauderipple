@@ -184,7 +184,8 @@ export function toChatMessages(req: AnthropicRequest, opts?: OpenAiTranslateOpti
         const url = imageUrl(block);
         if (url) parts.push({ type: "image_url", image_url: { url } });
       } else if (block.type === "tool_result") {
-        flush();
+        // All parallel calls must receive their tool outputs before any user image message.
+        // Keep images in parts until the complete tool-result batch has been emitted.
         const result = block as { tool_use_id: string; content?: string | AnthropicBlock[]; is_error?: boolean };
         let output = textOf(result.content);
         const images = imagesOf(result.content);

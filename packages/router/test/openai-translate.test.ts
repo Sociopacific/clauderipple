@@ -90,6 +90,30 @@ test("tool result images survive on chat and responses wires", () => {
   assert.equal(JSON.stringify({ chat, responses }).includes("[image omitted]"), false);
 });
 
+test("parallel tool results remain contiguous when Read returns an image", () => {
+  const req: AnthropicRequest = {
+    model: "m",
+    messages: [
+      { role: "assistant", content: [
+        { type: "tool_use", id: "read_1", name: "Read", input: {} },
+        { type: "tool_use", id: "card_1", name: "get_card", input: {} },
+      ] },
+      { role: "user", content: [
+        { type: "tool_result", tool_use_id: "read_1", content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+        ] },
+        { type: "tool_result", tool_use_id: "card_1", content: "Card details" },
+      ] },
+    ],
+  };
+  const chat = toOpenAiRequest(req, { model: "m", wire: "chat" }) as ChatRequest;
+  const messages = chat.messages.slice(1);
+  assert.deepEqual(messages.map((message) => message.role), ["assistant", "tool", "tool", "user"]);
+  assert.equal(messages[1]?.tool_call_id, "read_1");
+  assert.equal(messages[2]?.tool_call_id, "card_1");
+  assert.deepEqual(messages[3]?.content, [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }]);
+});
+
 test("chat SSE mapper emits text, indexed tool calls and cached-token usage", () => {
   const mapper = new OpenAiStreamMapper("test", 88);
   const records = [

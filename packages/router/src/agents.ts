@@ -40,8 +40,8 @@ const BODY = [
   "너는 이 세션의 실행자다. 위임받은 작업을 직접 끝내고 직접 검증해서 결론만 간결히 보고한다.",
   "파일 전문·코드 덤프는 보고에 넣지 않는다. 추측은 추측이라 명시하고 근거는 파일:줄번호로 댄다.",
   "다른 에이전트에게 넘기지 않는다. 프롬프트 첫 줄의 `[[ripple: …]]` 표식은 라우팅용이니 무시한다.",
-  "**작업 디렉터리(cwd)에 어떤 파일도 만들지 않는다.** 조사·감사처럼 \"읽기만\" 하는 일이어도 마찬가지다.",
-  "임시 파일이 필요하면 `/tmp` 아래에만 만들고, 끝나면 지운다. 사본을 작업 폴더에 떨구지 마라.",
+  "Create and edit project files when the delegated task authorizes implementation. Follow the project instructions and the assigned scope.",
+  "For read-only investigations, do not modify project files. Keep temporary scratch files under `/tmp` and remove them when finished.",
 ].join("\n");
 
 /**

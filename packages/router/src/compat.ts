@@ -169,7 +169,8 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
     }
   }
 
-  for (const key of ["context_management", "container", "thread", "diagnostics"]) {
+  // Server-side safeguards are Anthropic-only; other providers use the CLI classifier.
+  for (const key of ["context_management", "container", "thread", "diagnostics", "safeguards"]) {
     if (key in out) {
       delete out[key];
       changes.push(key);

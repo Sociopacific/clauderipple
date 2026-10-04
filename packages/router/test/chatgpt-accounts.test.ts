@@ -7,7 +7,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { ChatGptAdapter, exhaustedForMs } from "../src/providers/chatgpt/index.ts";
+import { ChatGptAdapter, exhaustedForMs, rateLimitsFromUsage } from "../src/providers/chatgpt/index.ts";
 import {
   ChatGptAccountPool,
   chatgptAccountsPath,
@@ -100,6 +100,20 @@ test("exhaustedForMs: out until the latest full window resets; not out below 100
   assert.equal(exhaustedForMs({ rate_limits: { primary: { used_percent: 99, reset_after_seconds: 10 } } }, now), undefined);
   assert.equal(exhaustedForMs({ rate_limits: { primary: { used_percent: 100, reset_after_seconds: 10 }, secondary: { used_percent: 100, reset_at: (now + 50_000) / 1000 } } }, now), 50_000);
   assert.equal(exhaustedForMs(null, now), undefined);
+});
+
+test("credits: usage balance exempts included quota, but empty credits do not", () => {
+  const quota = { rate_limit: { primary_window: { used_percent: 100, reset_after_seconds: 3600 } } };
+  for (const credits of [
+    { has_credits: true, unlimited: false, balance: "62500" },
+    { has_credits: false, unlimited: false, balance: "62500" },
+    { has_credits: false, unlimited: true, balance: "0" },
+  ]) assert.equal(exhaustedForMs(rateLimitsFromUsage({ ...quota, credits })), undefined);
+  for (const credits of [
+    { has_credits: false, unlimited: false, balance: "0" },
+    { has_credits: true, unlimited: false, balance: "0" },
+    { has_credits: true, unlimited: false, balance: "62500", overage_limit_reached: true },
+  ]) assert.equal(exhaustedForMs(rateLimitsFromUsage({ ...quota, credits })), 3_600_000);
 });
 
 test("pool: a due account refreshes once however many turns ask; a terminal rejection needs sign-in", async () => {
@@ -228,6 +242,18 @@ const usageLimit = (resetAfter: number): Behaviour => ({
   status: 429,
   headers: { "x-codex-primary-used-percent": "100", "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-after-seconds": String(resetAfter) },
   body: JSON.stringify({ error: { type: "usage_limit_reached", message: "The usage limit has been reached" } }),
+});
+
+test("credits: full included quota stays usable across snapshots without credit headers", async () => {
+  rig(1);
+  const full = { "x-codex-primary-used-percent": "100", "x-codex-primary-reset-after-seconds": "3600" };
+  behaviour.set("tok-0", [
+    { status: 200, headers: { ...full, "x-codex-credits-has-credits": "false", "x-codex-credits-unlimited": "false", "x-codex-credits-balance": "62500" } },
+    { status: 200, headers: full },
+  ]);
+  for (let i = 0; i < 3; i++) assert.equal((await call("credits", String(i))).status, 200);
+  assert.equal(hits.length, 3);
+  assert.equal(adapter.accountStatus()[0]!.state, "ready");
 });
 
 test("rotation: an account at its limit hands the same turn to the next, and the conversation stays there", async () => {

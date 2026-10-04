@@ -42,6 +42,10 @@ export function looksLikeAuth(text: string): boolean {
 
 export function mapHttpError(status: number, text: string): { status: number; body: string } {
   const message = `OpenAI-compatible provider: ${vendorMessage(text)}`;
+  // Claude Code keys its context-overflow recovery on this Anthropic error wording.
+  if ((status === 400 || status === 413) && /context_length_exceeded|input is longer than the model['’]s context length|input exceeds the context window|maximum context length|prompt is too long/i.test(text)) {
+    return anthropicError(400, "invalid_request_error", `prompt is too long: ${vendorMessage(text)}`);
+  }
   if (status === 401) return anthropicError(401, "authentication_error", message);
   // A 403 is often not the credential at all: a data-sharing policy that needs opting into, a
   // region, a model the account may not use. Calling it an authentication error sends the user

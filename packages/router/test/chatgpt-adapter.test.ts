@@ -15,7 +15,7 @@ fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessTo
 
 type Seen = { headers: http.IncomingHttpHeaders; body: Record<string, unknown>; path: string };
 const seen: Seen[] = [];
-let mode: "stream" | "search" | "image" | "image-refused" | "error429" | "sse-error" | "cut-off" = "stream";
+let mode: "stream" | "search" | "image" | "image-refused" | "error429" | "sse-error" | "cut-off" | "context-error" = "stream";
 // Active quota lookup (GET /wham/usage): its own mode so it can be exercised independently.
 let usageMode: "ok" | "unauthorized" | "no-window" = "ok";
 let usageHits = 0;
@@ -110,6 +110,10 @@ const backend = http.createServer((req, res) => {
     // which one the adapter echoed.
     turnStates += 1;
     res.writeHead(200, { "content-type": "text/event-stream", "x-codex-turn-state": `ts-${turnStates}` });
+    if (mode === "context-error") {
+      res.end(sse([{ type: "response.created", response: {} }, { type: "response.failed", response: { error: { code: "context_length_exceeded", message: "Your input exceeds the context window of this model. Please adjust your input and try again." } } }]));
+      return;
+    }
     if (mode === "sse-error") {
       res.end(sse([{ type: "response.created", response: {} }, { type: "error", error: { code: "server_is_overloaded", message: "overloaded" } }]));
       return;
@@ -166,6 +170,30 @@ function call(body: unknown, p = "/v1/messages"): Promise<{ status: number; text
 }
 
 const request: AnthropicRequest = { model: "claude-opus-4-6", stream: true, system: "sys", messages: [{ role: "user", content: "read a" }], tools: [{ name: "Read", input_schema: { type: "object" } }] };
+
+test("Fast configuration sends the subscription priority id and reports a downgrade", async () => {
+  const saved = adapter;
+  const file = path.join(home, "fast-test.log");
+  const fastLog = new Logger(file, 1e9, 0, false);
+  adapter = new ChatGptAdapter("fast-test", { type: "chatgpt", auth: "own", url: `http://127.0.0.1:${backendPort}`, serviceTier: "fast" }, home, fastLog);
+  const completed = happy.at(-1)!.response as { service_tier?: string };
+  completed.service_tier = "default";
+  try {
+    mode = "stream";
+    const response = await call({ ...request, stream: false });
+    assert.equal(response.status, 200);
+    assert.equal(seen.at(-1)!.body.service_tier, "priority");
+    assert.match(fs.readFileSync(file, "utf8"), /WARN .*requested=priority actual=default; Fast was not confirmed/);
+    completed.service_tier = "priority";
+    await call({ ...request, stream: false });
+    const lines = fs.readFileSync(file, "utf8").trim().split("\n");
+    assert.match(lines.at(-1)!, /requested=priority actual=priority/);
+    assert.ok(!lines.at(-1)!.includes("WARN"));
+  } finally {
+    delete completed.service_tier;
+    adapter = saved;
+  }
+});
 
 test("streaming: headers, request body, and translated Anthropic SSE", async () => {
   mode = "stream";
@@ -318,6 +346,18 @@ test("SSE error event → streamed Anthropic error event", async () => {
   assert.equal(r.status, 200);
   assert.ok(r.text.includes("event: error"));
   assert.ok(r.text.includes("overloaded_error"));
+});
+
+test("context overflow is HTTP 400 before streaming starts, so Claude can compact instead of retrying", async () => {
+  mode = "context-error";
+  for (const stream of [true, false]) {
+    const r = await call({ ...request, stream });
+    assert.equal(r.status, 400);
+    const error = JSON.parse(r.text).error;
+    assert.equal(error.type, "invalid_request_error");
+    assert.match(error.message, /prompt is too long/i);
+    assert.match(error.message, /context window/i);
+  }
 });
 
 test("fetchRateLimits: active lookup maps /wham/usage to the header shape and updates the snapshot", async () => {

@@ -99,6 +99,8 @@ export type ChatGptProvider = {
   debugDump?: boolean | "all";
   /** Reasoning effort when the request carries none. Default "high". */
   defaultEffort?: string;
+  /** Optional processing tier for subscription Responses requests. */
+  serviceTier?: "default" | "fast" | "priority";
   /** Models offered in the GUI (the Codex backend has no listing endpoint). */
   models?: ProviderModel[];
 };
@@ -249,6 +251,8 @@ export type Config = {
   providers: Record<string, Provider>;
   /** Picker-slot alias → route. Keys are the model ids the app sends (e.g. "claude-opus-4-8"). */
   routes: Record<string, Route>;
+  /** Opt-in target for Claude Code's Auto mode security-monitor requests only. */
+  autoModeClassifier?: Pick<Route, "provider" | "model" | "effort">;
   direct: DirectRule[];
   /** Short names usable in "[[ripple: sol@xhigh]]" markers and "@effort" suffixes. */
   aliases: Record<string, string>;
@@ -487,6 +491,17 @@ function foldSplitProviders(c: Config): Config {
 
 export function validate(c: Config): string[] {
   const errors: string[] = [];
+  if (c.autoModeClassifier !== undefined) {
+    const target = c.autoModeClassifier;
+    if (!target || typeof target !== "object") errors.push("autoModeClassifier must be an object");
+    else {
+      const provider = c.providers[target.provider];
+      if (!provider) errors.push("autoModeClassifier: unknown provider");
+      else if (provider.type === "anthropic" && !provider.accountPool) errors.push("autoModeClassifier: provider is ingress-only");
+      if (typeof target.model !== "string" || !target.model.trim()) errors.push("autoModeClassifier: missing model");
+      if (target.effort !== undefined && typeof target.effort !== "string") errors.push("autoModeClassifier: effort must be a string");
+    }
+  }
   for (const [alias, r] of Object.entries(c.routes)) {
     if (!c.providers[r.provider]) errors.push(`route ${alias}: unknown provider "${r.provider}"`);
     if (!r.model) errors.push(`route ${alias}: missing model`);
@@ -556,6 +571,7 @@ export function validate(c: Config): string[] {
         }
       }
     } else if (p.type === "chatgpt") {
+      if (p.serviceTier !== undefined && p.serviceTier !== "default" && p.serviceTier !== "fast" && p.serviceTier !== "priority") errors.push(`provider ${name}: serviceTier must be "default", "fast", or "priority"`);
       if (p.models !== undefined && !validModels(p.models)) {
         errors.push(`provider ${name}: ${MODELS_SHAPE}`);
       }

@@ -4,6 +4,21 @@ import { clampEffort, forwardCompatibleHeader, resolveCompatibleCaps, sanitizeFo
 
 const enabled = { ...STRICT_COMPAT_CAPS, thinking: "enabled" as const, effortLevels: ["low", "medium", "high"] };
 
+test("compatible providers do not receive Anthropic server safeguards", () => {
+  const input = {
+    model: "external-model",
+    safeguards: [{ type: "dangerous_tool_use", classifier_context: "context" }],
+    system: "Keep the original security instructions.",
+    messages: [{ role: "user", content: "hello" }],
+  };
+  const result = sanitizeForCompatible(input, enabled);
+  assert.equal("safeguards" in result.json, false);
+  assert.ok(result.changes.includes("safeguards"));
+  assert.deepEqual(result.json.messages, input.messages);
+  assert.equal(result.json.system, input.system);
+  assert.equal(input.safeguards.length, 1);
+});
+
 test("sanitizeForCompatible removes Anthropic-only request features and expands deferred tools", () => {
   const input = {
     thinking: { type: "adaptive", display: "updates", block_binding: { type: "enabled" } },
