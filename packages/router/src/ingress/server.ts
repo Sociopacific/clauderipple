@@ -329,13 +329,19 @@ export class OpenAiIngress {
         && (explicitProvider ? explicitProvider.type === "chatgpt" : isChatGptModel(requested, cfg));
       if (toChatGpt) {
         const adapter = this.deps.chatgpt!(explicitProvider ? explicit!.provider : null);
-        // As sent, compressed or not; only a mapping to another model name means rewriting it (and
-        // then it goes out uncompressed).
+        // Preserve the caller's explicit tier; a selected provider supplies only a missing default.
+        const providerTier = explicitProvider?.type === "chatgpt" ? explicitProvider.serviceTier : undefined;
+        const tier = body.service_tier === undefined && providerTier
+          ? providerTier === "fast" ? "priority" : providerTier : undefined;
         const renamed = explicit && explicit.model !== requested;
-        const payload = renamed ? Buffer.from(JSON.stringify({ ...body, model: explicit.model })) : raw;
+        const rewritten = !!renamed || tier !== undefined;
+        const payload = rewritten ? Buffer.from(JSON.stringify({ ...body,
+          ...(renamed ? { model: explicit.model } : {}),
+          ...(tier ? { service_tier: tier } : {}),
+        })) : raw;
         record = { kind: "messages", source: requested, target: explicit?.model ?? requested, provider: adapter.name, stream: body.stream === true };
         const outcome = await adapter.passthrough(req, res, path.slice("/v1".length), payload, codexConversation(req, body), {
-          bodyEncoded: !renamed,
+          bodyEncoded: !rewritten,
           onCompleted: (done) => { terminal = { status: done.status, bytes: done.bytes, ...(done.usage ? { usage: done.usage } : {}), ...(done.note ? { note: done.note } : {}) }; },
         });
         finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.note ? { note: outcome.note } : {}) });

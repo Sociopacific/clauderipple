@@ -108,6 +108,25 @@ test("a GPT turn from Codex goes out unchanged on a pool account, and comes back
   assert.deepEqual(record.usage, { input: 20, cached: 100, output: 5 });
 });
 
+test("Fast alias applies provider tier while preserving an explicit caller tier", async () => {
+  config.providers.fast = { type: "chatgpt", auth: "own", url: backendUrl, serviceTier: "fast" };
+  config.routes["gpt-test-fast"] = { provider: "fast", model: "gpt-6-sol" };
+  try {
+    for (const explicit of [undefined, "default", "priority"]) {
+      const request = { ...turn, model: "gpt-test-fast", ...(explicit ? { service_tier: explicit } : {}) };
+      const result = await codexCall("/v1/responses", request);
+      assert.equal(result.status, 200);
+      const wire = JSON.parse(hits.at(-1)!.body);
+      assert.equal(wire.model, "gpt-6-sol");
+      assert.equal(wire.service_tier, explicit ?? "priority");
+      assert.deepEqual(wire.input, request.input);
+    }
+  } finally {
+    delete config.providers.fast;
+    delete config.routes["gpt-test-fast"];
+  }
+});
+
 test("account 1 at its limit: Codex's same turn is answered on account 2, no sign-out", async () => {
   behaviour.set("tok-1", { status: 429, headers: { "x-codex-primary-used-percent": "100", "x-codex-primary-reset-after-seconds": "1800", "x-codex-primary-window-minutes": "300" }, body: JSON.stringify({ error: { type: "usage_limit_reached", message: "limit" } }) });
   const before = hits.length;

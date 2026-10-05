@@ -60,6 +60,18 @@ with the installed Codex client's request metadata, so accelerated execution on
 this account is not yet verified. The Fast picker entry requests priority; it
 cannot force the backend's scheduling decision.
 
+The OpenAI ingress also applies an explicitly routed ChatGPT provider's tier when
+`service_tier` is absent from the caller's body. Explicit caller tiers are preserved;
+rewritten requests are sent uncompressed. Regression: selecting a `-fast` alias
+previously renamed only the model, so an ingress benchmark accidentally measured
+standard processing. Verify the outbound tier, not just the selector label.
+On 2026-10-05, corrected `priority` coding requests measured 72.8 and 72.7 visible
+tokens/s; the intervening standard control measured 50.2 (an earlier standard run
+was 34.2). All used the same short prompt, Low reasoning, and no cached input.
+The returned tier was still `default`. These measurements show a repeatable speed
+difference, not a guaranteed tier entitlement or billing policy; backend scheduling
+and admission remain outside the router's control.
+
 ### Local Auto mode classifier override (verified 2026-10-01)
 
 Desktop's Claude Code 2.1.284 registers `CLAUDE_CODE_AUTO_MODE_MODEL` but ignores it
