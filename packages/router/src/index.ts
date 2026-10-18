@@ -15,11 +15,13 @@ import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
-import { startAdmin } from "./admin.ts";
+import { adoptNewClaudeModels, backfillContextWindows, measureUnsettledModels, startAdmin, type AdminDeps } from "./admin.ts";
+import { loadModelCatalog } from "./catalog.ts";
 import { RequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
 import { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { VERSION } from "./version.ts";
+import { allowLongSilences } from "./providers/retry.ts";
 
 // Startup timing. Claude Desktop routes *all* its traffic through us in picker mode, so every
 // second before the socket is open is a second the app cannot reach anything (ERR_PROXY_-
@@ -87,6 +89,8 @@ const health = new UpstreamHealth(
 );
 
 const observedClaudeCodeAuth = new ObservedClaudeCodeAuth(path.join(home, "claude-auth-observed.json"));
+// Before any provider fetches: a reasoning model may stay silent past fetch's 300s default.
+allowLongSilences();
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth });
 const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name) });
 
@@ -145,12 +149,13 @@ proxy
     // Quota only arrives on GPT response headers, so a quiet day left the status 11 hours stale
     // (2026-09-20). Ask once now, after listen(), and never wait for the answer.
     proxy.chatgptRefreshAll();
-    const admin = await startAdmin({
+    const adminDeps: AdminDeps = {
       config: () => store.get(),
       configFile: configPath(),
       log: log!,
       stats: () => proxy.stats,
       health: () => health.consecutiveFailures,
+      providerHealth: () => proxy.providerHealth.snapshot(),
       version: VERSION,
       requests,
       chatgpt: () => ({
@@ -161,15 +166,41 @@ proxy
         accounts: () => proxy.chatgptAccounts(),
         clearCooldown: (id) => proxy.chatgptClearCooldown(id),
       }),
+      google: () => ({
+        accounts: () => proxy.googleAccounts(),
+        models: (name: string) => proxy.googleFetchModels(name),
+        usage: (name: string) => proxy.googleUsage(name),
+        clearCooldown: (id: string) => proxy.googleClearCooldown(id),
+        recheckVerification: (id: string) => proxy.googleRecheckVerification(id),
+      }),
       credentials: () => proxy.credentialHealth(),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
+      claudeModels: () => proxy.claudeModels.list(),
+      opencodeUsage: (name: string) => proxy.opencodeLimits(name),
+      grokUsage: (name: string) => proxy.grokLimits(name),
       image: (req, signal) => proxy.generateImage(req, signal),
+      modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),
-    });
+    };
+    const admin = await startAdmin(adminDeps);
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
     setImmediate(premintLeaves);
+    // A minute in, once start-up traffic has settled: first the catalogue's context windows are
+    // written into models already saved without one (a one-shot pass), then a few one-token requests
+    // per model whose effort nobody has measured yet, so effort works without the owner re-saving the
+    // provider. The backfill runs first so its write lands before the measured jobs re-read the config.
+    setTimeout(() => {
+      void backfillContextWindows(adminDeps)
+        .catch((e: Error) => log!.warn(`context windows: ${e.message}`))
+        .finally(() => measureUnsettledModels(adminDeps));
+    }, 60_000).unref();
+    // Claude releases reach the declared models without a ClaudeRipple release: checked a minute in,
+    // then every six hours (the catalogue itself is cached for an hour).
+    const adopt = () => void adoptNewClaudeModels(adminDeps).catch((e: Error) => log!.warn(`claude models: ${e.message}`));
+    setTimeout(adopt, 60_000).unref();
+    setInterval(adopt, 6 * 60 * 60_000).unref();
   })
   .catch((e) => {
     log!.error(`listen failed: ${(e as Error).message}`);

@@ -12,7 +12,7 @@ import tls from "node:tls";
 
 import { CertStore } from "../src/certs.ts";
 import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
-import { UpstreamHealth } from "../src/health.ts";
+import { providerExhaustion, UpstreamHealth, type ProviderExhaustion } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { Proxy, errorSnippet } from "../src/proxy.ts";
 import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
@@ -48,8 +48,8 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
 async function roundTrip(
   providerHeaders: Record<string, string>,
   reply: ProviderReply,
-  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown> } = {},
-): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; providerCalls: number }> {
+  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown>; exhausted?: boolean } = {},
+): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; providerCalls: number; health: Record<string, ProviderExhaustion> }> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-headers-"));
   const ca = createCa({ cn: "clauderipple test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
@@ -90,6 +90,7 @@ async function roundTrip(
     home,
     requests,
   });
+  if (options.exhausted) proxy.providerHealth.observe("p", 402, providerExhaustion(402, "Insufficient Balance"));
   await proxy.listen();
 
   const sock = net.connect(proxyPort, "127.0.0.1");
@@ -107,6 +108,7 @@ async function roundTrip(
       `authorization: ${CLIENT_TOKEN}\r\n` +
       `x-api-key: ${CLIENT_KEY}\r\n` +
       "anthropic-version: 2023-06-01\r\n" +
+      "x-claude-code-session-id: 11111111-2222-4333-8444-555555555555\r\n" +
       `content-length: ${Buffer.byteLength(body)}\r\n\r\n` +
       body,
   );
@@ -120,7 +122,7 @@ async function roundTrip(
   await new Promise<void>((r) => provider.close(() => r()));
   const records = requests.list(10);
   fs.rmSync(home, { recursive: true, force: true });
-  return { seen, seenBody, records, clientStatus, clientBody, providerCalls };
+  return { seen, seenBody, records, clientStatus, clientBody, providerCalls, health: proxy.providerHealth.snapshot() };
 }
 
 test("an anthropic-compatible request does not leak Anthropic safeguards to its provider", async () => {
@@ -131,6 +133,25 @@ test("an anthropic-compatible request does not leak Anthropic safeguards to its 
   assert.equal(r.clientStatus, 200);
   assert.equal(r.providerCalls, 1);
   assert.equal("safeguards" in r.seenBody, false);
+});
+
+test("routed 402 and billing 429 teach provider health, but transient 429 does not; success clears it", async () => {
+  for (const [status, message, exhausted] of [[402, 'Insufficient Balance', true], [429, 'insufficient_quota', true], [429, 'rate_limit_exceeded', false]] as const) {
+    const result = await roundTrip({}, { status, headers: { 'content-type': 'application/json', 'retry-after': '2' }, body: Buffer.from(JSON.stringify({ error: { message } })) });
+    assert.equal(result.clientStatus, status);
+    assert.equal(!!result.health.p, exhausted);
+    if (exhausted) assert.equal(result.health.p!.until - result.health.p!.at, 2000);
+  }
+  const recovered = await roundTrip({}, OK_REPLY, { exhausted: true });
+  assert.equal(recovered.clientStatus, 200);
+  assert.deepEqual(recovered.health, {});
+  // A translated adapter maps 402 to a client 400, but must retain its actual meaning.
+  const translated = await roundTrip({}, { status: 402, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"error":{"message":"Insufficient Balance"}}') }, { provider: { type: 'openai-compatible' } });
+  assert.equal(translated.health.p?.reason, 'insufficient_balance');
+  for (const code of ['insufficient_quota', 'rate_limit_exceeded']) {
+    const streamed = await roundTrip({}, { status: 200, headers: { 'content-type': 'text/event-stream' }, body: Buffer.from(`data: ${JSON.stringify({ error: { code, message: 'request refused' } })}\n\n`) }, { provider: { type: 'openai-compatible' } });
+    assert.equal(!!streamed.health.p, code === 'insufficient_quota');
+  }
 });
 
 test("an x-api-key provider never receives the caller's authorization header", async () => {
@@ -157,6 +178,20 @@ test("a provider error body is recorded with credentials masked, and still reach
   assert.match(record.note ?? "", /^upstream 401: .*Authentication Fails/);
   assert.match(record.note ?? "", /\[REDACTED\] is invalid/);
   assert.doesNotMatch(record.note ?? "", /sk-abcdef/);
+  assert.equal(record.resent, undefined);
+});
+
+// Anthropic drops a thread after a few idle minutes; the CLI replays the conversation on the 404,
+// so the log must not show it as a failure (2026-10-07: about half the turns after five minutes).
+test("a thread the API forgot is recorded as resent, and the 404 still reaches the client", async () => {
+  const body = Buffer.from(JSON.stringify({ type: "error", error: { type: "not_found_error", message: "No thread state was found for the requested `previous_message_id`.", details: { error_code: "thread_not_found" } } }));
+  const { records, clientStatus } = await roundTrip({ "x-api-key": "PROVIDER-KEY" }, { status: 404, headers: { "content-type": "application/json" }, body });
+  assert.equal(clientStatus, 404);
+  const record = records.find((r) => r.kind === "messages");
+  assert.ok(record, "the request was logged");
+  assert.equal(record.ok, false);
+  assert.equal(record.resent, true);
+  assert.match(record.note ?? "", /^upstream 404: /);
 });
 
 test("errorSnippet decodes gzip, masks bearer tokens and explicit opaque credentials, and bounds its length", () => {
@@ -171,6 +206,11 @@ test("errorSnippet decodes gzip, masks bearer tokens and explicit opaque credent
   assert.equal(errorSnippet(Buffer.alloc(0), undefined), "(empty body)");
   assert.match(errorSnippet(Buffer.from("<html><body>Sign in</body></html>"), undefined, [], "text/html; charset=utf-8"), /^HTML page \(\d+B\)/);
   assert.ok(errorSnippet(Buffer.from("x".repeat(1000)), undefined).length <= 301);
+});
+
+test("a request is recorded under the Claude Code session that sent it", async () => {
+  const { records } = await roundTrip({ "x-api-key": "PROVIDER-KEY" }, OK_REPLY);
+  assert.equal(records[0]?.session, "11111111-2222-4333-8444-555555555555");
 });
 
 test("non-credential headers still reach the provider", async () => {
@@ -233,6 +273,7 @@ test("an anthropic-compatible provider never receives a thread continue: the CLI
   assert.equal(r.providerCalls, 0, "the delta never reached the provider");
   const record = r.records.find((x) => x.kind === "messages");
   assert.match(record?.note ?? "", /thread continue refused/);
+  assert.equal(record?.resent, true, "a resend asked for is not a failure");
 });
 
 test("a thread create still reaches an anthropic-compatible provider, without the thread fields", async () => {

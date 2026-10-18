@@ -43,6 +43,10 @@ test("validate accepts native Anthropic providers and confines account pools to 
   assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "bad" as "api-key" } } }).some((error) => error.includes("auth must be")));
   assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "api-key", accountPool: true } } }).some((error) => error.includes('requires auth "claude-code"')));
   assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "claude-code", accountPool: "yes" as unknown as boolean } } }).some((error) => error.includes("must be true or false")));
+  // `limits` is carried by every provider kind, so a wrong type is refused once for all of them.
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { ok: { type: "anthropic", auth: "claude-code", limits: false } } }), []);
+  assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "claude-code", limits: "no" as unknown as boolean } } }).some((error) => error.includes("limits must be true or false")));
+  assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "chatgpt", limits: 1 as unknown as boolean } } }).some((error) => error.includes("limits must be true or false")));
 });
 
 test("validate accepts compatible caps and rejects invalid values", () => {
@@ -217,4 +221,21 @@ test("validate refuses a credential pool with duplicate ids or non-string header
   assert.ok(cfg([{ headers: {} }])[0]?.includes("non-empty id"));
   assert.ok(cfg([{ id: "a", headers: { key: 5 } }])[0]?.includes("string record"));
   assert.ok(cfg([{ id: "a", headers: {}, label: 7 }])[0]?.includes("label must be a string"));
+});
+
+test("validate accepts a grok provider and refuses a model that would leave its session headers behind", () => {
+  const ok = validate({ ...DEFAULTS, providers: { grok: { type: "grok", models: [{ id: "grok-4.7", name: "Grok 4.7", contextWindow: 256000, effortLevels: ["low", "high"] }] } } });
+  assert.deepEqual(ok, []);
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { grok: { type: "grok", home: "/tmp/g", cli: "/tmp/g/bin/grok", clientVersion: "1.0.46", url: "https://cli-chat-proxy.grok.com/v1" } } }), []);
+  const rewired = validate({ ...DEFAULTS, providers: { grok: { type: "grok", models: [{ id: "grok-4.7", wire: "responses" }] } } });
+  assert.ok(rewired.some((e) => e.includes("cannot set wire, url or authHeader")));
+  assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", url: "cli-chat-proxy.grok.com" } } }).some((e) => e.includes("url must start")));
+  assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", home: "" } } }).some((e) => e.includes("home must be a non-empty string")));
+  // clientVersion goes out as a header value.
+  assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", clientVersion: "1.0.46\nx-evil: 1" } } }).some((e) => e.includes("clientVersion cannot be sent as a header")));
+  assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", clientVersion: "버전1" } } }).some((e) => e.includes("clientVersion cannot be sent as a header")));
+  assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", clientVersion: "1.0.46\u0000" } } }).some((e) => e.includes("clientVersion cannot be sent as a header")));
+  // A grok model with no overrides is its own provider: providerFor hands it back unchanged.
+  const provider = { type: "grok" as const, models: [{ id: "grok-4.7" }] };
+  assert.equal(providerFor(provider, "grok-4.7"), provider);
 });

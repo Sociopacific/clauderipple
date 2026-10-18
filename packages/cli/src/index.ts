@@ -21,6 +21,7 @@ import { applyAppProxy, caTrusted, currentAppProxy, nssDb, removeAppProxy, trust
 import { runtime } from "./runtime.ts";
 import { codexOff, codexOn } from "./codex.ts";
 import { ingressModels } from "../../router/src/ingress/models.ts";
+import { GROK_DEFAULT_URL } from "../../router/src/providers/grok/catalog.ts";
 import { claudeLogin, claudeLogout, desktopClaudeCodeDirs } from "./claude-auth.ts";
 import { openBrowser } from "./browser.ts";
 import { electronPath, installTrayRuntime, startTray } from "./tray.ts";
@@ -327,7 +328,7 @@ async function status(): Promise<void> {
   const p = await probe({ host: cfg.listen.host, port: cfg.listen.port, caPem: caPath, upstream: cfg.upstream });
   rows.push(["probe", `${p.ok ? "ok" : "FAIL"}: ${p.detail} (${p.ms}ms)`]);
   for (const [name, p2] of Object.entries(cfg.providers)) {
-    const providerUrl = p2.type === "chatgpt" ? (p2.url ?? "https://chatgpt.com") : p2.type === "anthropic" ? "https://api.anthropic.com" : p2.url;
+    const providerUrl = p2.type === "chatgpt" ? (p2.url ?? "https://chatgpt.com") : p2.type === "anthropic" ? "https://api.anthropic.com" : p2.type === "google" ? (p2.url ?? "https://generativelanguage.googleapis.com") : p2.type === "grok" ? (p2.url ?? GROK_DEFAULT_URL) : p2.url;
     const u = new URL(providerUrl);
     rows.push([`provider ${name}`, await tcpCheck(u.hostname, Number(u.port) || (u.protocol === "https:" ? 443 : 80))]);
   }
@@ -457,6 +458,7 @@ function help(): void {
   status
   start | stop | restart
   logs [-n N] [-f]
+  remote [install|uninstall|status|pair]  run or manage the phone host (macOS, Windows, Linux systemd)
   config            print the config file path
   ui                open the dashboard in your browser
   tray [--install]  start the menu-bar / tray app (--install fetches Electron, ~270MB, once)
@@ -465,18 +467,32 @@ function help(): void {
   logout            forget every ChatGPT account added with "login" (the Codex CLI's own login is left alone)
   claude-login      connect a Claude subscription in the browser (--setup-token: via \`claude setup-token\`; --manual: paste the code)
   claude-logout     remove every Claude subscription added to ClaudeRipple
+  google-login      add a Google account for the Antigravity (Cloud Code Assist) backend (prints Google's terms warning first)
+  google-logout     remove every Google account added to ClaudeRipple
   image "<prompt>" [-o FILE] [--aspect square|landscape|portrait] [--transparent] [--ref FILE ...]
                     generate an image with your ChatGPT subscription and print the file's path
   picker on|off     show your mapped models by name in the Claude Desktop picker (trusts the CA in your login keychain, routes the app through ClaudeRipple)
   codex on|off      add/remove ClaudeRipple's local OpenAI provider and selection profile for Codex CLI
   agent-title on|off|status
                     prefix subagent titles with the real model and thinking depth ("Terra·high · …") via a Claude Code hook
+  mod on|off|status show where each request went above the Claude Code prompt, and the request log in a pane (/ripple-log), via a Claude Code mod
 
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 }
 
 try {
   switch (cmd) {
+    case "remote": {
+      const script = path.resolve(here, "../../remote/src/main" + path.extname(fileURLToPath(import.meta.url)));
+      const { spawn } = await import("node:child_process");
+      const child = spawn(installedRuntime.node, [script, ...args.slice(1)], { stdio: "inherit", env: { ...process.env, ...installedRuntime.env } });
+      for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => child.kill(signal));
+      process.exitCode = await new Promise<number>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", code => resolve(code ?? 1));
+      });
+      break;
+    }
     case "install":
       await install();
       break;
@@ -538,6 +554,18 @@ try {
       } else console.log(agentTitleHookEnabled() ? "on" : "off");
       break;
     }
+    case "mod": {
+      const sub = args[1];
+      const { setStatusMod, statusModEnabled } = await import("./settings.ts");
+      if (sub === "on" || sub === "off") {
+        const r = setStatusMod(sub === "on", installedRuntime.modDir);
+        for (const n of r.notes) console.log(`✓ ${n}`);
+        if (!r.changed) console.log(`✓ already ${sub}`);
+        if (r.backup) console.log(`  backup: ${r.backup}`);
+        console.log("Applies to Claude Code sessions started from now on.");
+      } else console.log(statusModEnabled() ? "on" : "off");
+      break;
+    }
     case "login": {
       const { login } = await import("../../router/src/providers/chatgpt/auth.ts");
       const { saveChatGptAccount, readChatGptAccounts, chatgptAccountsPath } = await import("../../router/src/providers/chatgpt/accounts.ts");
@@ -587,6 +615,30 @@ try {
     case "claude-logout":
       console.log(claudeLogout(homeDir()) ? "✓ ClaudeRipple Claude accounts removed" : "no ClaudeRipple Claude accounts stored");
       break;
+    case "google-login": {
+      const { GoogleOAuthSession } = await import("../../router/src/providers/google/login.ts");
+      const { ANTIGRAVITY_WARNING } = await import("../../router/src/providers/google/antigravity.ts");
+      const { readGoogleAccounts, googleAccountsPath } = await import("../../router/src/providers/google/accounts.ts");
+      // The terms warning is printed once, before anything else, so a sign-in is never accidental.
+      console.log(`⚠ ${ANTIGRAVITY_WARNING}\n`);
+      const before = readGoogleAccounts(homeDir()).length;
+      const session = new GoogleOAuthSession({ home: homeDir() }, ANTIGRAVITY_WARNING);
+      const { url } = await session.start();
+      console.log(before > 0
+        ? `Opening your browser to add a Google account (${before} signed in already). Sign in with the account to add; this window waits up to 5 minutes.`
+        : "Opening your browser to sign in with Google. Sign in there; this window waits up to 5 minutes.");
+      if (!openBrowser(url)) console.log(`Open this URL manually:\n${url}`);
+      await session.result;
+      const total = readGoogleAccounts(homeDir()).length;
+      console.log(`✓ Google account added. ${total} account${total === 1 ? "" : "s"} in ${googleAccountsPath(homeDir())}; refreshed automatically.`);
+      break;
+    }
+    case "google-logout": {
+      const { removeAllGoogleAccounts } = await import("../../router/src/providers/google/accounts.ts");
+      const removed = removeAllGoogleAccounts(homeDir());
+      console.log(removed > 0 ? `✓ removed ${removed} Google account${removed === 1 ? "" : "s"}` : "no Google account stored");
+      break;
+    }
     case "image":
       await image();
       break;
@@ -597,7 +649,7 @@ try {
       await update();
       break;
     case "tray": {
-      const result = args.includes("--install") ? installTrayRuntime() : startTray();
+      const result = args.includes("--install") ? installTrayRuntime() : await startTray();
       console.log(result.message);
       if (!result.ok) process.exit(1);
       break;

@@ -1,10 +1,14 @@
 <p align="center">
-  <img src="docs/media/icon.png" width="128" alt="ClaudeRipple">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/mark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="brand/mark.svg">
+    <img src="brand/mark.svg" width="120" height="120" alt="ClaudeRipple 마스코트 리플이: 속이 빈 파문 고리에 물마루가 말려 오른 모습">
+  </picture>
 </p>
 
 <h1 align="center">ClaudeRipple</h1>
 
-<p align="center"><a href="README.md">English</a> · <b>한국어</b></p>
+<p align="center"><a href="README.md">English</a> · <b>한국어</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português (BR)</a></p>
 
 <p align="center">
   <b>채팅은 Claude 그대로. Code만 GPT로.</b><br>
@@ -25,16 +29,24 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/tour.png" width="880" alt="ClaudeRipple 설정 화면: 상태, 모델 매핑, 프로바이더, 클라이언트, 요청 로그">
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="1분 둘러보기: Claude Desktop의 모델 메뉴에 다른 모델이 들어가고, 프롬프트마다 추론 강도를 정하고, 서브에이전트는 맞는 모델로 보냅니다. 누르면 전체 영상이 열립니다."></a><br>
+  <sub>1분 둘러보기: Claude Desktop의 모델 메뉴에 다른 모델이 들어가고, 프롬프트마다 추론 강도를 정하고, 서브에이전트는 맞는 모델로 보냅니다. 누르면 전체 영상이 열립니다.</sub>
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Claude Desktop 피커에 실제 이름으로"><br><sub>Claude Desktop 피커에 GPT 모델이 실제 이름으로</sub></td>
-    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="Code 탭에서 답하는 GPT-5.6 Luna"><br><sub>Code 탭에서 고른 추론 강도 그대로 답하는 GPT-5.6 Luna</sub></td>
+    <td align="center" width="34%"><img src="docs/media/picker.png" width="300" alt="Claude Desktop의 원래 모델 메뉴에 GPT·DeepSeek·GLM·Gemini"><br><sub>Claude Desktop의 원래 모델 메뉴에 GPT·DeepSeek·GLM·Gemini</sub></td>
+    <td align="center" width="66%"><img src="docs/media/answer.png" alt="Code 탭에서 일하는 GPT-6 Astra, 오른쪽에는 모든 요청 기록"><br><sub>Code 탭에서 일하는 GPT-6 Astra, 오른쪽에는 모든 요청 기록</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="백그라운드 작업 패널에 실제 모델 이름으로 표시된 서브에이전트"><br><sub>GPT-5.6 Terra·Sol로 도는 서브에이전트, 작업 패널에 실제 이름으로</sub></td>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="DeepSeek·GLM으로 도는 서브에이전트, 작업 패널에 실제 이름으로"><br><sub>DeepSeek·GLM으로 도는 서브에이전트, 작업 패널에 실제 이름으로</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/mod-band.png" alt="리플 모드: 추론 강도, 컨텍스트, 캐시 타이머, 실제로 답한 모델과 캐시 적중률"><br><sub>리플 모드: 추론 강도, 컨텍스트, 캐시 타이머, 실제로 답한 모델과 캐시 적중률</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/media/mod-alerts.png" alt="캐시가 식거나 한도가 가까우면 경고, 새 대화로 인수인계"><br><sub>캐시가 식거나 한도가 가까우면 경고, 새 대화로 인수인계</sub></td>
+    <td align="center" width="50%"><img src="docs/media/mod-settings.png" alt="빠른 설정: 자동 추론 강도, 판정 모델, 워커 모드"><br><sub>빠른 설정: 자동 추론 강도, 판정 모델, 워커 모드</sub></td>
   </tr>
 </table>
 
@@ -101,7 +113,9 @@ Anthropic이 만든 커넥터가 전부 그대로 동작합니다. 1P에 남는 
 
 ### OpenAI API 키가 필요한가요?
 
-필요 없습니다. ChatGPT Plus나 Pro 구독이면 됩니다. 앱에서 로그인하면 되고 API 키는 쓰지 않습니다.
+필요 없습니다. Codex가 포함된 ChatGPT 요금제면 됩니다 — Plus·Pro·Business, 그리고 워크스페이스 관리자가
+Codex를 켜 둔 Enterprise·Edu. 앱에서 로그인하면 되고 API 키는 쓰지 않습니다. 사용량 한도는 요금제 것을 따르며,
+한도를 다 쓰면 구매해 둔 Codex 크레딧으로 이어서 씁니다.
 API 키는 DeepSeek·Kimi·GLM·OpenRouter처럼 다른 프로바이더를 붙일 때만 씁니다.
 
 ### 어떤 모델을 쓸 수 있나요?
@@ -131,6 +145,15 @@ ClaudeRipple이 Claude에 하는 일은 작고 확인할 수 있습니다. Claud
 것인데, 이는 Anthropic 약관의 적용을 받습니다. Anthropic API 키로 쓰면 이 문제가 없습니다. Claude 구독 여러 개를
 돌려 쓰는 것도 같은 약관 아래 각자 판단할 일입니다. 계정을 어떻게 다룰지는 Anthropic만 정할 수 있으니, 여기 적은
 내용은 보장이 아닙니다.
+
+### Gemini를 Google 계정으로 쓰면요?
+
+AI Studio API 키는 Google이 공식 지원하는 방식이고 안전합니다. Google 계정 로그인(Antigravity)은 다릅니다.
+Google [Antigravity 약관](https://antigravity.google/terms) 6조와 [Gemini CLI FAQ](https://geminicli.com/docs/resources/faq/)는
+그 로그인 정보를 다른 프로그램에서 쓰는 것을 위반으로 명시합니다. Google은 2026년 2월 이렇게 쓰인 계정을 정지했고(정지되면
+Gemini CLI와 Code Assist도 막혔습니다), [2차 위반은 영구 정지](https://github.com/google-gemini/gemini-cli/discussions/20632)라고
+밝혔습니다. ClaudeRipple은 다른 도구들도 제공하고 요청이 있어 이 로그인을 넣었으며, 시작 전에 이 경고를 보여 주고 트래픽을
+숨기는 일은 하지 않습니다. 쓰신다면 주 계정이 아닌 계정을 쓰세요.
 
 ### ChatGPT 계정을 여러 개 쓸 수 있나요?
 
@@ -226,12 +249,18 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
   서버 측 스레드 처리, 도구 호출과 이미지 왕복, 모델이 받는 범위로 추론 강도 클램프, 호환 벤더에는 Anthropic 전용 필드 제거.
 - **제대로 된 요청 로그.** 누가 물었고 어떤 모델이 답했는지, 입력·캐시·출력 토큰, 지연, 상태를 요청마다. 한 시간 요약 포함.
 - **서브에이전트 이름표.** 백그라운드 작업 패널에 "Agent" 대신 `Terra·high · Review`가 보입니다.
+- **입력창 위의 리플 모드.** 띠 하나에 추론 강도, 컨텍스트, 캐시 타이머, 마지막 요청에 실제로 답한 모델과 캐시
+  적중률이 보입니다. 작은 판정 모델(Haiku 5.5 또는 Jev)이 프롬프트마다 최근 대화와 함께 읽고 low부터 max까지 추론
+  강도를 정합니다. 맡긴 일은 `ripple:auto`로 가고, 판정 모델이 난이도에 따라 워커를 고릅니다. 가벼운 일은 DeepSeek·GLM,
+  어려운 일은 GPT·Opus로. 캐시가 식었을 때, 컨텍스트가 무거워졌을 때, 요금제 한도가 80%를 넘었을 때 카드로 알려 주고,
+  압축이나 같은 폴더 새 세션으로의 인수인계를 제안합니다. `Log`(또는 `/ripple-log`)로 요청 로그를 옆 패널에 엽니다.
+  클라이언트 화면의 스위치 하나, 또는 `clauderipple mod on`.
 - **ChatGPT 구독으로 이미지 생성.** `clauderipple image "<프롬프트>"`. 참고 이미지와 투명 배경도 됩니다. 서브에이전트에도
   방법이 적혀 있어, GPT나 DeepSeek 워커가 이미지 도구 없이 이미지를 만들고 직접 확인합니다.
 - **원하면 가벼운 워커.** 스위치 하나로, 생성된 서브에이전트에 세션의 MCP·플러그인 도구 전부 대신 워커가 쓰는 도구만
   줍니다. 워커 첫 요청이 3.3만에서 0.9만 토큰으로 줄었습니다.
 - **터미널이 싫은 사람을 위해.** 원클릭 연결 확인과 모델 자동 검색이 붙은 프로바이더 프리셋, 드롭다운 모델 매핑, 자동 저장,
-  한국어·영어 UI. 런타임을 품고 첫 실행에 스스로 설치하는 메뉴 막대 앱. 서명·공증 완료.
+  한국어·영어·중국어·일본어·스페인어·포르투갈어 UI. 런타임을 품고 첫 실행에 스스로 설치하는 메뉴 막대 앱. 서명·공증 완료.
 
 <p align="center">
   <img src="docs/media/mapping.png" width="880" alt="모델 매핑: Claude 이름마다 실제로 답할 모델과 추론 강도">
@@ -320,7 +349,7 @@ node packages/cli/src/index.ts ui        # 브라우저에서 로컬 GUI 열기
 ```
 
 `uninstall`은 전부 되돌리고 `~/.claude/settings.json`을 백업에서 복원합니다. 그 밖의 명령: `status`, `start`, `stop`,
-`restart`, `logs -f`, `login`, `logout`, `claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`,
+`restart`, `logs -f`, `login`, `logout`, `claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`, `mod on|off`,
 `codex on|off`, `update`, `image "<프롬프트>"`.
 </details>
 
@@ -406,7 +435,7 @@ codex --profile clauderipple -m claude-sonnet-5
 
 Claude 모델이 Codex 모델 목록에 이름 그대로 뜹니다(ClaudeRipple이 Codex 자체 카탈로그 옆에 모델 카탈로그를 씁니다).
 Claude는 Claude Code 로그인(실행 중인 Desktop 세션, 터미널 로그인, 또는 ClaudeRipple 자체 로그인 — **프로바이더 →
-Claude → Claude 구독 연결…**을 누르면 브라우저가 열리고 터미널은 필요 없습니다. `clauderipple claude-login`과 같습니다)이나
+Claude (Anthropic) → + Claude 계정 추가**를 누르면 브라우저가 열리고 터미널은 필요 없습니다. `clauderipple claude-login`과 같습니다)이나
 Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관의 적용을 받습니다. 설정한 Anthropic 호환 프로바이더도
 같은 방식으로 쓸 수 있습니다.
 
@@ -419,6 +448,8 @@ Anthropic API 키로 갑니다. 구독 로그인 재사용은 Anthropic 약관�
 | 프로바이더 | 종류 | 인증 | 모델 목록 | 비고 |
 |---|---|---|---|---|
 | ChatGPT 구독 | Codex 백엔드 | 로그인 여러 개, 한도 차면 자동 전환(Codex 로그인도 재사용) | 구독에서 자동으로 읽음(GPT-6 Sol·Luna·Astra, GPT-5.6 …) | 추론 강도 low…max(Luna는 ultra), 프롬프트 캐시 94~99 % |
+| Google Gemini | Gemini API | AI Studio API 키, 또는 Google 계정 로그인(Antigravity, 위 FAQ 참고) | 자동 검색 | 번역(Messages ⇄ generateContent), 턴 사이 thought signature 유지 |
+| Grok 구독 | Grok CLI 채팅 프록시 | Grok CLI 로그인(`grok login`), 갱신은 CLI가 함 | 구독에서 자동으로 읽음(Grok 4.7, 4.7 Fast, 4.6, 4.5) | 번역(Chat Completions), 추론 강도 low…xhigh. 공개 API가 아닌 CLI 전용 채널([§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)) |
 | OpenRouter | Anthropic 호환 | API 키 | 400+, 자동 검색 | 모델별 추론 강도 지원을 API에서 읽음 |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen(국제/중국) | Anthropic 호환 | API 키 | 프리셋 | 벤더 공식 문서로 확인 |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI 호환 | API 키 | 자동 검색 | 번역(Chat Completions / Responses) |

@@ -1,10 +1,14 @@
 <p align="center">
-  <img src="docs/media/icon.png" width="128" alt="ClaudeRipple">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/mark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="brand/mark.svg">
+    <img src="brand/mark.svg" width="120" height="120" alt="The ClaudeRipple mascot: a hollow ripple ring with a curling wave crest">
+  </picture>
 </p>
 
 <h1 align="center">ClaudeRipple</h1>
 
-<p align="center"><b>English</b> · <a href="README.ko.md">한국어</a></p>
+<p align="center"><b>English</b> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português (BR)</a></p>
 
 <p align="center">
   <b>Chat stays Claude. Only Code becomes GPT.</b><br>
@@ -26,16 +30,24 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/tour.png" width="880" alt="ClaudeRipple settings tour: status, model mapping, providers, clients, request log">
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="A one-minute tour: other models in Claude Desktop's own model menu, effort set for every prompt, and each subagent sent to the model that fits. Click for the full video."></a><br>
+  <sub>A one-minute tour: other models in Claude Desktop's own model menu, effort set for every prompt, and each subagent sent to the model that fits. Click for the full video.</sub>
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Real names in the Claude Desktop picker"><br><sub>GPT models under their real names in the Claude Desktop picker</sub></td>
-    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="GPT-5.6 Luna answering in the Claude Desktop Code tab"><br><sub>GPT-5.6 Luna answering in the Code tab, at the effort you chose</sub></td>
+    <td align="center" width="34%"><img src="docs/media/picker.png" width="300" alt="GPT, DeepSeek, GLM and Gemini in Claude Desktop's own model menu"><br><sub>GPT, DeepSeek, GLM and Gemini in Claude Desktop's own model menu</sub></td>
+    <td align="center" width="66%"><img src="docs/media/answer.png" alt="GPT-6 Astra working in the Code tab, every request logged on the right"><br><sub>GPT-6 Astra working in the Code tab, every request logged on the right</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="Subagents on GPT-5.6 Terra and Sol, named in the background-task panel"><br><sub>Subagents on GPT-5.6 Terra and Sol, named in the background-task panel</sub></td>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="Subagents on DeepSeek and GLM, named in the background-task panel"><br><sub>Subagents on DeepSeek and GLM, named in the background-task panel</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/mod-band.png" alt="The ripple mod: effort, context, cache timer, and which model answered with its cache hit"><br><sub>The ripple mod: effort, context, cache timer, and which model answered with its cache hit</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/media/mod-alerts.png" alt="Warnings when the cache goes cold or a limit is near, and a handoff to a fresh chat"><br><sub>Warnings when the cache goes cold or a limit is near, and a handoff to a fresh chat</sub></td>
+    <td align="center" width="50%"><img src="docs/media/mod-settings.png" alt="Quick settings: automatic effort, the judge, worker modes"><br><sub>Quick settings: automatic effort, the judge, worker modes</sub></td>
   </tr>
 </table>
 
@@ -114,8 +126,10 @@ Claude. Most people map one or two names to GPT and leave the rest alone.
 
 ### Do I need an OpenAI API key?
 
-No. A ChatGPT Plus or Pro subscription works — you sign in from the app and no API key
-is involved. API keys are for the other providers (DeepSeek, Kimi, GLM, OpenRouter and
+No. Any ChatGPT plan that includes Codex works — Plus, Pro and Business, and Enterprise or
+Edu where the workspace admin has turned Codex on. You sign in from the app and no API key
+is involved. The plan's usage limits apply; once they are used up, Codex credits you have
+bought carry on. API keys are for the other providers (DeepSeek, Kimi, GLM, OpenRouter and
 anything else with an Anthropic- or OpenAI-compatible endpoint).
 
 ### Which models can I use?
@@ -150,6 +164,18 @@ ClaudeRipple has one optional feature of that kind: Claude inside Codex using yo
 subscription login. That use is subject to Anthropic's terms; an Anthropic API key avoids
 the question. Rotating several Claude subscriptions is likewise your call under those
 terms. Only Anthropic can say how an account is treated, so nothing here is a promise.
+
+### What about Gemini through a Google account?
+
+An AI Studio API key is the way Google supports, and the safe one. The Google account
+sign-in (Antigravity) is different: Google's [Antigravity terms](https://antigravity.google/terms)
+(section 6) and the [Gemini CLI FAQ](https://geminicli.com/docs/resources/faq/) name using
+those credentials from another program as a breach. In February 2026 Google suspended
+accounts used this way — the suspension also cut off Gemini CLI and Code Assist — and
+[said](https://github.com/google-gemini/gemini-cli/discussions/20632) a second violation
+is permanent. ClaudeRipple offers the sign-in because others do and people asked, shows
+this warning before it starts, and does nothing to hide the traffic. Use a secondary
+account if you use it at all.
 
 ### Can I use several ChatGPT accounts?
 
@@ -243,7 +269,7 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 
 - **Any model in Claude Desktop and Claude Code.** GPT-6 Sol / Luna / Astra and
   GPT-5.6 Terra / Sol / Luna through your ChatGPT Plus/Pro subscription (new models
-  appear the day OpenAI serves them), or DeepSeek, Kimi, GLM,
+  appear the day OpenAI serves them), Google Gemini, or DeepSeek, Kimi, GLM,
   MiniMax, Qwen, Grok, Mistral, Groq, Together, Fireworks, OpenRouter (400+ models)
   and local Ollama / LM Studio. Under their real names in the picker, or mapped onto
   a Claude name.
@@ -272,6 +298,15 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   latency, status, per request, with a one-hour summary.
 - **Subagent name tags.** The background-task panel shows `Terra·high · Review`
   instead of a generic "Agent".
+- **The ripple mod, above the prompt.** A band shows the reasoning effort, context, cache
+  timer, and which model answered your last request with its cache hit. A small judge
+  model (Haiku 5.5 or Jev) reads each prompt with the recent turns and sets the effort,
+  low through max. Delegated work goes to `ripple:auto`, and the judge sends each task to
+  a worker by difficulty: light work to DeepSeek or GLM, hard work to GPT or Opus. Cards
+  warn when the cache has gone cold, the context gets heavy or a plan window passes 80%,
+  and offer compact or a handoff to a fresh session in the same folder. `Log` (or
+  `/ripple-log`) opens the request log in a side pane. One switch on the Clients screen,
+  or `clauderipple mod on`.
 - **Images from your ChatGPT subscription.** `clauderipple image "<prompt>"`, with
   reference images and transparent backgrounds. Subagents are told how, so a GPT or
   DeepSeek worker can make an image and look at it without an image tool.
@@ -279,8 +314,8 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   tools a worker uses instead of every MCP server and plugin of the session: one
   worker's first request fell from 33k to 9k tokens.
 - **Made for people who don't want a terminal.** Provider presets with one-click
-  connection tests and model discovery, drop-down model mapping, auto-save, Korean
-  and English UI. A menu-bar app that carries its own runtime and sets itself up on
+  connection tests and model discovery, drop-down model mapping, auto-save, a UI in
+  English, Korean, Chinese, Japanese, Spanish and Portuguese. A menu-bar app that carries its own runtime and sets itself up on
   first launch. Signed and notarized.
 
 <p align="center">
@@ -374,7 +409,7 @@ node packages/cli/src/index.ts ui        # open the local GUI in your browser
 
 `uninstall` reverses everything and restores `~/.claude/settings.json` from a backup.
 Other commands: `status`, `start`, `stop`, `restart`, `logs -f`, `login`, `logout`,
-`claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`,
+`claude-login`, `claude-logout`, `picker on|off`, `agent-title on|off`, `mod on|off`,
 `codex on|off`, `update`, `image "<prompt>"`.
 </details>
 
@@ -476,8 +511,8 @@ login is used. An `openai_base_url` you set yourself is left alone. `clauderippl
 Claude models show up in Codex's model list under their names (ClaudeRipple writes
 a model catalog next to Codex's own). Claude is reached through your Claude Code
 login (detected from the running Desktop session, the terminal login, or a
-sign-in of ClaudeRipple's own: **Providers → Claude → Connect Claude
-subscription…** opens the browser, no terminal needed; the same as
+sign-in of ClaudeRipple's own: **Providers → Claude (Anthropic) → + Add
+Claude account** opens the browser, no terminal needed; the same as
 `clauderipple claude-login`) or an Anthropic API key. Reusing a
 subscription login is subject to Anthropic's terms. Any Anthropic-compatible
 provider you configured is available the same way.
@@ -491,6 +526,8 @@ provider you configured is available the same way.
 | Provider | Kind | Auth | Model list | Notes |
 |---|---|---|---|---|
 | ChatGPT subscription | Codex backend | several sign-ins, switching when one runs out (Codex login reused too) | read from your subscription (GPT-6 Sol, Luna, Astra, GPT-5.6 …) | effort low…max (Luna: ultra), prompt cache 94–99 % |
+| Google Gemini | Gemini API | AI Studio API key, or Google account sign-in (Antigravity, see the FAQ) | discovered | translated (Messages ⇄ generateContent), thought signatures kept across turns |
+| Grok subscription | Grok CLI chat proxy | the Grok CLI's sign-in (`grok login`), refreshed through the CLI | read from your subscription (Grok 4.7, 4.7 Fast, 4.6, 4.5) | translated (Chat Completions), effort low…xhigh; the CLI's own channel, not a published API ([§4e](docs/ARCHITECTURE.md#4e-grok-providers-implemented-2026-10-08)) |
 | OpenRouter | Anthropic-compatible | API key | 400+, discovered | per-model effort support read from the API |
 | DeepSeek, Kimi, Z.ai GLM, MiniMax, Qwen (intl / cn) | Anthropic-compatible | API key | preset | verified against vendor docs |
 | xAI Grok, Mistral, Groq, Together, Fireworks | OpenAI-compatible | API key | discovered | translated (Chat Completions / Responses) |
@@ -509,7 +546,8 @@ Claude Desktop / claude CLI ──HTTPS_PROXY──▶ ClaudeRipple ──▶ ap
                                                │
                         mapped model ──────────┼──▶ chatgpt.com/backend-api (Responses ⇄ Messages)
                                                ├──▶ Anthropic-compatible vendors (+ compat layer)
-                                               └──▶ OpenAI-compatible vendors (Messages ⇄ Chat/Responses)
+                                               ├──▶ OpenAI-compatible vendors (Messages ⇄ Chat/Responses)
+                                               └──▶ Google Gemini (Messages ⇄ generateContent)
 Codex app / CLI ──/v1/responses──▶ ClaudeRipple ingress ──▶ Claude (your login or API key) / vendors
 ```
 

@@ -10,17 +10,21 @@ import { ChatGptAccountPool, type ChatGptAccountSummary, type ChatGptCredential,
 import { SseParser } from "./sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { looksLikeAuth } from "../openai/index.ts";
-import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest } from "./translate.ts";
+import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest, type TranslateOptions } from "./translate.ts";
+import { refusesReplayedReasoning } from "../../reasoning.ts";
 import type { RequestUsage } from "../../requestlog.ts";
+import { providerExhaustion, type ProviderExhaustion } from "../../health.ts";
 import type { SearchBackend, SearchHit, WebSearchQuery } from "../../websearch.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
-import { codexClientVersion, parseCodexCatalog } from "./catalog.ts";
+import { codexClientVersion, latestCodexVersion, parseCodexCatalog } from "./catalog.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { homeDir } from "../../config.ts";
 
 export const DEFAULT_BASE = "https://chatgpt.com/backend-api";
 const PING_MS = 15_000;
+/** How long a stream may hold its headers waiting for upstream's first item (see `handle`). Tests shorten it. */
+export const streamHold = { ms: 5_000 };
 /** Active quota lookup. Measured 2026-09-20: GET {base}/wham/usage → 200 JSON. The binary also
  * carries `/api/codex/usage`, but that path answers 403 here; `wham` is the one that works. */
 const USAGE_PATH = "/wham/usage";
@@ -56,7 +60,7 @@ export type ImageRequest = {
 
 export type ImageResult = { data: Buffer; format: string; size?: string; quality?: string; revisedPrompt?: string };
 
-export type ChatGptOutcome ={ status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string };
+export type ChatGptOutcome ={ status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -110,16 +114,34 @@ export function rateLimitsFromHeaders(h: Headers): Record<string, unknown> | nul
   const primary = window("primary");
   if (!primary) return null;
   const secondary = window("secondary");
+  const flag = (k: string): boolean | undefined => {
+    const v = h.get(k)?.toLowerCase();
+    return v === "true" ? true : v === "false" ? false : undefined;
+  };
+  const credits = creditsSnapshot(flag("x-codex-credits-has-credits"), flag("x-codex-credits-unlimited"), h.get("x-codex-credits-balance"), undefined);
   return {
     type: "codex.rate_limits",
     plan_type: h.get("x-codex-plan-type") ?? undefined,
     rate_limits: { primary, secondary: secondary && secondary.window_minutes ? secondary : null },
-    ...(h.has("x-codex-credits-has-credits") ? { credits: {
-      has_credits: h.get("x-codex-credits-has-credits")?.toLowerCase() === "true",
-      unlimited: h.get("x-codex-credits-unlimited")?.toLowerCase() === "true",
-      balance: h.get("x-codex-credits-balance"),
-    } } : {}),
+    ...(credits ? { credits } : {}),
     at: Date.now(),
+  };
+}
+
+/**
+ * The account's purchased credits, which the backend draws on once a plan window is used up — the
+ * account keeps answering at 100%. Measured 2026-10-06: response headers carry
+ * `x-codex-credits-has-credits: False` / `-unlimited: False` / `-balance: 0` (Python-style
+ * booleans), and `/wham/usage` carries `credits: {has_credits, unlimited, overage_limit_reached,
+ * balance}`. Null when the backend said nothing about credits.
+ */
+function creditsSnapshot(hasCredits: unknown, unlimited: unknown, balance: unknown, overageReached: unknown): Record<string, unknown> | null {
+  if (typeof hasCredits !== "boolean" && typeof unlimited !== "boolean") return null;
+  return {
+    has_credits: hasCredits === true,
+    unlimited: unlimited === true,
+    ...(typeof balance === "string" || typeof balance === "number" ? { balance: String(balance) } : {}),
+    ...(typeof overageReached === "boolean" ? { overage_limit_reached: overageReached } : {}),
   };
 }
 
@@ -134,11 +156,11 @@ export function rateLimitsFromHeaders(h: Headers): Record<string, unknown> | nul
 export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | null {
   const b = body as {
     plan_type?: unknown;
-    credits?: { has_credits?: boolean; unlimited?: boolean; overage_limit_reached?: boolean; balance?: string | number | null } | null;
     rate_limit?: {
       primary_window?: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null;
       secondary_window?: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null;
     } | null;
+    credits?: { has_credits?: unknown; unlimited?: unknown; balance?: unknown; overage_limit_reached?: unknown } | null;
   } | null;
   const win = (w: { used_percent?: unknown; limit_window_seconds?: unknown; reset_after_seconds?: unknown; reset_at?: unknown } | null | undefined): Record<string, number> | null => {
     const used = typeof w?.used_percent === "number" ? w.used_percent : undefined;
@@ -152,11 +174,13 @@ export function rateLimitsFromUsage(body: unknown): Record<string, unknown> | nu
   const primary = win(b?.rate_limit?.primary_window);
   if (!primary) return null;
   const secondary = win(b?.rate_limit?.secondary_window);
+  const c = b?.credits;
+  const credits = c ? creditsSnapshot(c.has_credits, c.unlimited, c.balance, c.overage_limit_reached) : null;
   return {
     type: "codex.rate_limits",
     plan_type: typeof b?.plan_type === "string" ? b.plan_type : undefined,
     rate_limits: { primary, secondary: secondary && secondary.window_minutes ? secondary : null },
-    ...(b?.credits ? { credits: b.credits } : {}),
+    ...(credits ? { credits } : {}),
     at: Date.now(),
   };
 }
@@ -206,13 +230,15 @@ function windowResetMs(w: Window, now: number): number | undefined {
 /**
  * How long an account is out, from a rate-limit snapshot: the latest reset among the windows it
  * has used up, since it is usable only once every full window has reset. Undefined when no window
- * is full — the account is not out, whatever else the snapshot says.
+ * is full — the account is not out, whatever else the snapshot says — and undefined when the
+ * account has credits to spend past the window: the backend keeps serving it, and when the credits
+ * run out it says so with a 429, which rests the account the ordinary way.
  */
-export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefined, now = Date.now()): number | undefined {
-  const credits = snapshot?.credits as { has_credits?: boolean; unlimited?: boolean; overage_limit_reached?: boolean; balance?: unknown } | undefined;
-  // The live backend can report has_credits=false alongside a positive spendable balance.
-  // Let the server decide admission when credits remain; a genuine HTTP 429 still cools the pool.
-  if (credits?.overage_limit_reached !== true && (credits?.unlimited === true ||
+export function exhaustedForMs(snapshot: Record<string, unknown> | null | undefined, now = Date.now(), creditsCount = true): number | undefined {
+  const credits = snapshot?.credits as { has_credits?: unknown; unlimited?: unknown; overage_limit_reached?: unknown; balance?: unknown } | undefined;
+  // A positive balance can coexist with has_credits=false. A real upstream refusal still
+  // rests the account using the included windows (creditsCount=false).
+  if (creditsCount && credits?.overage_limit_reached !== true && (credits?.unlimited === true ||
       (credits?.balance != null && Number.isFinite(Number(credits.balance)) && Number(credits.balance) > 0) ||
       (credits?.has_credits === true && credits.balance == null))) return undefined;
   const limits = (snapshot?.rate_limits ?? null) as { primary?: Window | null; secondary?: Window | null } | null;
@@ -611,6 +637,14 @@ export class ChatGptAdapter {
       return null;
     }
     this.noteRateLimits(tokens, parsed);
+    // The backend's own answer that every window has room ends a usage-limit cooldown early: the
+    // limit was reset or the plan topped up, and the account stayed refused until the old reset time
+    // otherwise (2026-10-14: credits added at 15:50, still "cooling" until 21:42). Only this asked-for
+    // figure does it, never the headers of the 429 that started the cooldown.
+    if (exhaustedForMs(parsed) === undefined && this.accounts.peekCredentials().some((c) => c.id === tokens.id && !this.pool.hasUsable(this.name, [c]))) {
+      this.pool.clear(this.name, tokens.id);
+      this.log.info(`chatgpt ${this.name}: account ${tokens.ownerId.slice(0, 8)} has room again; back in rotation`);
+    }
     return parsed;
   }
 
@@ -641,11 +675,12 @@ export class ChatGptAdapter {
       this.log.warn(`chatgpt ${this.name}: model-catalog fetch skipped: ${tokens.message}`);
       return null;
     }
+    const version = codexClientVersion(undefined, await latestCodexVersion());
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), MODELS_TIMEOUT_MS);
     let res: Response;
     try {
-      res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${MODELS_PATH}?client_version=${encodeURIComponent(codexClientVersion())}`, {
+      res = await fetch(`${(this.cfg.url ?? DEFAULT_BASE).replace(/\/$/, "")}${MODELS_PATH}?client_version=${encodeURIComponent(version)}`, {
         method: "GET",
         headers: {
           authorization: `Bearer ${tokens.accessToken}`,
@@ -808,7 +843,8 @@ export class ChatGptAdapter {
       const headerRecord = Object.fromEntries(upstream.headers.entries());
       const snapshot = rateLimitsFromHeaders(upstream.headers);
       const retryHeader = headerRecord["retry-after"] ? retryAfterMs({ "retry-after": headerRecord["retry-after"] }) : undefined;
-      const waitMs = retryHeader ?? exhaustedForMs(snapshot) ?? retryAfterMs(headerRecord);
+      // The account was refused, so whatever credits the headers report did not carry it past the window.
+      const waitMs = retryHeader ?? exhaustedForMs(snapshot, Date.now(), false) ?? retryAfterMs(headerRecord);
       // A refusal here is a rest, never a pool quarantine: "sign in again" is the store's to say
       // (needsReauth, above), and a quarantine would outlive the new token a sign-in brings.
       const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text);
@@ -958,6 +994,29 @@ export class ChatGptAdapter {
     return { status: upstream.status, bytes, ...(usage ? { usage } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` };
   }
 
+  /**
+   * The options one turn is translated with. The conversation is the storage (reasoning.ts), so what
+   * to replay is read out of the request itself; `carried` is filled in as the input is built and the
+   * outcome lands in the request log. `replay: false` is the retry after the backend refused that
+   * carrier, and it puts back exactly the request this adapter sent before any of this existed.
+   */
+  private responsesOptions(carried: { replayed: number; undecodable: number }, model: string, effort: string | undefined, replay = true): TranslateOptions {
+    return {
+      model,
+      effort: effort ?? this.cfg.defaultEffort ?? "high",
+      identity: this.cfg.identity ?? true,
+      ...(this.cfg.serviceTier ? { serviceTier: this.cfg.serviceTier } : {}),
+      ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
+      replay,
+      // The envelope names this provider and this model, and the request builder refuses anything
+      // else: reasoning outlives the turn that made it, and a conversation moved to another model
+      // must not carry the old one's sealed state with it (reasoning.ts).
+      env: { p: this.name, m: model },
+      carried,
+      log: (line) => this.log.info(`chatgpt ${this.name}: ${line} (${model})`),
+    };
+  }
+
   /** Handle a fully-read Messages request. `model`/`effort` already resolved by routing. */
   async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<ChatGptOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
@@ -971,14 +1030,9 @@ export class ChatGptAdapter {
     const serverTools = serverToolNames(json.tools);
     if (serverTools.size > 0) this.log.warn(`chatgpt ${this.name}: dropped server tools for ${model}: ${[...serverTools].join(", ")} (Anthropic runs these; this provider cannot)`);
 
-    const upstreamReq = toResponsesRequest(json, {
-      model,
-      effort: effort ?? this.cfg.defaultEffort ?? "high",
-      identity: this.cfg.identity ?? true,
-      ...(this.cfg.serviceTier ? { serviceTier: this.cfg.serviceTier } : {}),
-      ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
-    });
-    const body = JSON.stringify(upstreamReq);
+    const carried = { replayed: 0, undecodable: 0 };
+    let upstreamReq = toResponsesRequest(json, this.responsesOptions(carried, model, effort));
+    let body = JSON.stringify(upstreamReq);
     const cacheKey = upstreamReq.prompt_cache_key;
     // Input estimate for message_start: a conversation only grows, so the last measured total is a floor.
     const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(cacheKey) ?? 0);
@@ -989,7 +1043,7 @@ export class ChatGptAdapter {
     // One account answers the turn. Which one is decided here, and a refusal before any byte has
     // reached the client moves the same turn to the next account, so the client is answered on its
     // first ask. The conversation stays on the account that answered: moving it costs the cache.
-    const sent = await this.sendToAnAccount({
+    const ask = (): Promise<SendResult> => this.sendToAnAccount({
       conversation: cacheKey,
       path: "/codex/responses",
       body,
@@ -1012,6 +1066,18 @@ export class ChatGptAdapter {
         };
       },
     });
+    let sent = await ask();
+    // A 4xx that names reasoning is the backend refusing the sealed reasoning we replayed — the blob
+    // was minted by the model that is no longer answering, or by another account. The summary is
+    // worth nothing without it, so the turn is asked once without: replaying is an optimisation and
+    // must never be the reason a user's turn fails (reasoning.ts).
+    if (carried.replayed > 0 && sent.kind === "refused" && refusesReplayedReasoning(sent.status, sent.text)) {
+      this.log.warn(`chatgpt ${this.name}: upstream ${sent.status} refused ${carried.replayed} replayed reasoning item(s) for ${model}; asking again without them: ${sent.text.slice(0, 200)}`);
+      upstreamReq = toResponsesRequest(json, this.responsesOptions({ replayed: 0, undecodable: 0 }, model, effort, false));
+      body = JSON.stringify(upstreamReq);
+      carried.replayed = 0;
+      sent = await ask();
+    }
     if (sent.kind !== "ok") {
       res.off("close", onClose);
       if (sent.kind === "aborted") return { status: 0, bytes: 0, note: "client closed" };
@@ -1038,7 +1104,11 @@ export class ChatGptAdapter {
         if (this.cfg.debugDump) this.dump(sent.status, json, upstreamReq, sent.text);
       }
       res.writeHead(err.status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}) }).end(err.body);
-      return { status: err.status, bytes: err.body.length, note };
+      return { status: err.status, bytes: err.body.length, note,
+        ...(sent.kind === "no-account" ? { upstreamCalled: false as const, refusal: "no-account" as const } : {}),
+        ...(sent.kind === "refused" && upstreamReq.service_tier !== undefined ? { requestedTier: upstreamReq.service_tier } : {}),
+        ...(sent.kind === "refused" ? { exhaustion: providerExhaustion(sent.status, sent.text, sent.retryAfterSeconds === undefined ? undefined : sent.retryAfterSeconds * 1000) } : {}),
+      };
     }
     const { upstream, credential } = sent;
     const nextTurnState = upstream.headers.get("x-codex-turn-state");
@@ -1049,25 +1119,47 @@ export class ChatGptAdapter {
 
     if (this.cfg.debugDump === "all") this.dump(upstream.status, json, upstreamReq, "");
     const wantStream = json.stream === true;
-    const mapper = new StreamMapper(model, startInput, toolNameRestoreMap(json));
+    const mapper = new StreamMapper(model, startInput, toolNameRestoreMap(json), this.name);
     const parser = new SseParser();
     let bytes = 0;
     let ping: NodeJS.Timeout | null = null;
 
     // Keep early rejection as an HTTP error until an actual content block arrives.
     // A 200 followed by an error loses the status Claude uses for overflow recovery.
+    let messageSent = false;
     const pendingEvents: ReturnType<StreamMapper["start"]> = [];
+    const openStream = (): void => {
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    };
     const sendEvents = (events: ReturnType<StreamMapper["start"]>): void => {
       if (!wantStream) return;
       pendingEvents.push(...events);
       if (!res.headersSent) {
         if (mapper.failure?.type === "invalid_request_error") return;
         if (!pendingEvents.some((e) => e.event !== "message_start")) return;
-        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+        openStream();
       }
-      for (const ev of pendingEvents.splice(0)) bytes += write(res, formatSse(ev));
+      for (const ev of pendingEvents.splice(0)) {
+        const written = write(res, formatSse(ev));
+        bytes += written;
+        if (ev.event === "message_start" && written > 0) messageSent = true;
+      }
     };
+    // The hold waits for upstream's first item, which normally follows the request within a second
+    // — and an overflow rejection comes before it. Should it not come, the client must still hear
+    // something: past this deadline the stream opens with message_start and the pings keep it alive,
+    // as they did before the hold.
+    let holdDeadline: NodeJS.Timeout | null = null;
     if (wantStream) {
+      holdDeadline = setTimeout(() => {
+        if (res.headersSent || res.writableEnded || mapper.failure) return;
+        openStream();
+        for (const ev of [...pendingEvents.splice(0), ...mapper.start()]) {
+          const written = write(res, formatSse(ev));
+          bytes += written;
+          if (ev.event === "message_start" && written > 0) messageSent = true;
+        }
+      }, streamHold.ms);
       ping = setInterval(() => {
         if (res.headersSent && !res.writableEnded) bytes += write(res, formatSse({ event: "ping", data: { type: "ping" } }));
       }, PING_MS);
@@ -1115,6 +1207,7 @@ export class ChatGptAdapter {
       }
     } finally {
       if (ping) clearInterval(ping);
+      if (holdDeadline) clearTimeout(holdDeadline);
       res.off("close", onClose);
       try {
         await reader.cancel();
@@ -1125,6 +1218,7 @@ export class ChatGptAdapter {
 
     const failure = mapper.failure;
     const failedStatus = failure?.type === "invalid_request_error" ? 400 : failure?.type === "overloaded_error" ? 529 : failure?.type === "rate_limit_error" ? 429 : 502;
+    const exhaustion = failure ? providerExhaustion(429, `${failure.code ?? ""} ${failure.message}`, retryAfterMs(Object.fromEntries(upstream.headers))) : undefined;
     if (!wantStream || (failure && !res.headersSent)) {
       // A failed turn is an error here too, not a 200 carrying whatever arrived before it failed.
       const msg = failure ? anthropicError(failedStatus, failure.type, failure.message).body : JSON.stringify(mapper.message());
@@ -1137,10 +1231,11 @@ export class ChatGptAdapter {
     return {
       // A stream has already sent 200; the record still says the turn failed.
       status: failure ? failedStatus : 200,
+      exhaustion,
       bytes,
       note: failure
-        ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens})`
-        : `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason}`,
+        ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} replayed=${carried.replayed} reasoning=${mapper.reasoningCount})`
+        : `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason} replayed=${carried.replayed} reasoning=${mapper.reasoningCount}${upstreamReq.service_tier ? " fast" : ""}`,
       usage: {
         input: u.input_tokens,
         cached: u.cache_read_input_tokens,
@@ -1148,6 +1243,9 @@ export class ChatGptAdapter {
         output: u.output_tokens,
       },
       stopReason: mapper.stopReason,
+      ...((!wantStream && !failure) || messageSent ? { messageId: mapper.messageId } : {}),
+      ...(upstreamReq.service_tier !== undefined ? { requestedTier: upstreamReq.service_tier } : {}),
+      ...(mapper.servedTier !== undefined ? { servedTier: mapper.servedTier } : {}),
     };
   }
 }

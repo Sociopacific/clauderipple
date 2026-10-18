@@ -45,6 +45,17 @@ export type ProviderPreset = {
    * measured reply, never from a docs page: DeepSeek's docs do not mention it and it works.
    */
   serverTools?: boolean;
+  /**
+   * Models the plan runs a web search for on its Anthropic endpoint, although they are spoken to
+   * on another wire. Only ever set from a measured reply, like `serverTools`.
+   */
+  anthropicSearch?: { url: string; authHeader: "x-api-key" | "authorization-bearer"; models: string[] };
+  /**
+   * Ask the Responses wire for its reasoning sealed (`include: ["reasoning.encrypted_content"]`,
+   * `reasoning.summary: "auto"`), so the conversation can carry it back (reasoning.ts). Only ever set
+   * from a measured reply: a vendor that does not know the field may refuse the turn outright.
+   */
+  sealedReasoning?: boolean;
   verified: boolean;
   notes?: string;
   docsUrl: string;
@@ -63,9 +74,12 @@ export const PRESETS: ProviderPreset[] = [
       { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
       { id: "deepseek-flash", name: "DeepSeek Flash" },
     ],
-    // https://api-docs.deepseek.com/guides/anthropic_api/ documents thinking and output_config.effort,
-    // but no accepted effort-level set for its Anthropic endpoint; strip effort rather than guess.
-    effortLevels: [],
+    // https://api-docs.deepseek.com/guides/thinking_mode/ maps every requested effort onto three:
+    // minimal/low → low, medium/high/xhigh → high, max/ultra → max (thinking on, high, by default).
+    // Measured 2026-10-06 on this endpoint: `output_config.effort` is validated (an unknown value is
+    // 422 "expected one of none … max") and low/high/max answer 200 on deepseek-v4-pro and
+    // deepseek-flash. Offering the three real levels keeps the menu from showing steps that collapse.
+    effortLevels: ["low", "high", "max"],
     thinking: "enabled",
     // Measured 2026-09-17, not documented: a `web_search_20250305` tool sent to this endpoint came
     // back with server_tool_use, a web_search_tool_result holding ten hits, and
@@ -245,6 +259,9 @@ export const PRESETS: ProviderPreset[] = [
     authHeader: "authorization-bearer",
     wire: "responses",
     sessionHeader: "x-opencode-session",
+    // Measured 2026-10-14 on muse-spark-1.3-contributor: `include` and `summary` are accepted, the
+    // sealed item comes back on a tool-bearing turn, and replaying it in place answers 200.
+    sealedReasoning: true,
     modelsUrl: "https://opencode.ai/zen/go/v1/models",
     modelsAuthHeader: "authorization-bearer",
     // Every wire below is from the endpoint table OpenCode publishes per model
@@ -256,7 +273,8 @@ export const PRESETS: ProviderPreset[] = [
     // assumption rather than a measurement, and it was wrong: deepseek-v4.1-flash accepts all eight
     // levels including max, and mimo-v2.6-pro accepts none/low/medium/high (measured 2026-09-22).
     // It could not correct itself either — an empty ladder is never measured. Left unstated, each
-    // model's ladder is established on the first save.
+    // model's ladder is established on the first save: from models.dev when it lists the model
+    // (catalog.ts — OpenCode's own catalogue, which does state ladders), by request otherwise.
     fallbackModels: [
       // Responses — the preset's own wire, so these carry no override.
       { id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 (Contributor)" },
@@ -305,6 +323,13 @@ export const PRESETS: ProviderPreset[] = [
     // to the Responses models above; the Chat and Anthropic ones carry their own empty ladder.
     effortLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
     thinking: "none",
+    // The DeepSeek models are served on Chat Completions, which ignores every search option, but
+    // the same key on the Anthropic endpoint runs `web_search_20250305` for them: Claude Code's own
+    // side request came back with a `web_search_tool_result` of ten real pages and
+    // `web_search_requests: 1` (measured 2026-10-07; a bearer header there answers "Missing API
+    // key"). Kimi K3, MiniMax M3 and Qwen3.8 Flash take the tool on that endpoint and never search;
+    // GLM and MiMo are not served there at all.
+    anthropicSearch: { url: "https://opencode.ai/zen/go", authHeader: "x-api-key", models: ["deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro"] },
     verified: true,
     notes: "One subscription and key, three endpoints by wire. Measured 2026-09-18. Responses: Muse Spark answers, effort ladder tops out at xhigh, prompt cache reached 96% on a repeated turn. Chat: glm-5.3, glm-5.3-flash, kimi-k3, kimi-k2.7-code, deepseek-v4.1-flash, deepseek-v4-pro, longcat-2.0 and mimo-v2.5-pro all answered. Anthropic: minimax-m3, qwen3.8-max and qwen3.8-flash answered with the prompt cache at 99% on a repeated turn, while union-alpha, the free row, answered \"Model is unavailable\". The Muse Spark Contributor tier is ~90% cheaper because Meta states those interactions improve its products, and OpenCode refuses the model until the workspace opts in (403 DataPolicyError); it is also limited to some regions.",
     docsUrl: "https://opencode.ai/docs/go/",

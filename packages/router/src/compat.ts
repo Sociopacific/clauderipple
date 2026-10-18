@@ -2,6 +2,8 @@
 // an Anthropic-shaped Messages endpoint without implementing Anthropic's full feature set.
 // Pure: callers receive a new object and an audit list; the input is never mutated.
 
+import { droppedServerToolNote, scrubSchema } from "./providers/chatgpt/translate.ts";
+
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
@@ -71,6 +73,10 @@ export function forwardCompatibleHeader(name: string, caps: ResolvedCompatibleCa
 /**
  * Return the nearest supported canonical effort level. Unknown requested levels fall back
  * to the provider's lowest listed level, which is safer than forwarding a rejected value.
+ *
+ * Equally near on both sides goes up: `medium` on a `low`/`high`/`max` ladder — the shape most
+ * OpenCode Go models list (models.dev, 2026-10-02) — is `high`. Asking for medium means "more
+ * than low", and rounding it down cost a worker its reasoning for the sake of a tie.
  */
 export function clampEffort(effort: string, supported: string[]): string {
   if (supported.includes(effort)) return effort;
@@ -79,9 +85,11 @@ export function clampEffort(effort: string, supported: string[]): string {
     .map((value) => ({ value, index: EFFORT_LEVELS.indexOf(value as EffortLevel) }))
     .filter((entry) => entry.index >= 0);
   if (requested < 0 || canonical.length === 0) return supported[0] ?? effort;
-  return canonical.reduce((best, candidate) =>
-    Math.abs(candidate.index - requested) < Math.abs(best.index - requested) ? candidate : best,
-  ).value;
+  return canonical.reduce((best, candidate) => {
+    const distance = Math.abs(candidate.index - requested);
+    const bestDistance = Math.abs(best.index - requested);
+    return distance < bestDistance || (distance === bestDistance && candidate.index > best.index) ? candidate : best;
+  }).value;
 }
 
 function stripCacheControl(value: unknown): { value: unknown; count: number } {
@@ -121,6 +129,13 @@ function stripCacheControl(value: unknown): { value: unknown; count: number } {
 // translated providers drop it for the same reason (`systemText` in providers/chatgpt/translate.ts,
 // measured 2026-09-13), and it means nothing to a provider that is not Anthropic.
 const BILLING_BLOCK = /^x-anthropic-billing-header:/;
+
+function appendSystemText(system: unknown, text: string): unknown {
+  if (system === undefined || system === null || system === "") return text;
+  if (typeof system === "string") return `${system}\n\n${text}`;
+  if (Array.isArray(system)) return [...system, { type: "text", text }];
+  return system;
+}
 
 function stripBillingHeader(system: unknown): { value: unknown; removed: number } {
   if (typeof system === "string") {
@@ -196,6 +211,7 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
     const droppedNames = new Set<string>();
     let deferred = 0;
     let dropped = 0;
+    const patterns = { count: 0 };
     for (const tool of out.tools) {
       const source = record(tool);
       if (!source) {
@@ -214,15 +230,28 @@ export function sanitizeForCompatible(json: Record<string, unknown>, caps: Resol
         delete next.defer_loading;
         deferred++;
       }
+      // A strict regex engine refuses the whole request over one pattern it cannot compile:
+      // DeepSeek's Anthropic endpoint answers 400 `"^[^\\0]*$" is not a "regex"` for the Artifact
+      // tool (issue #51). The client validates its own tool input, so the pattern adds nothing here.
+      if (next.input_schema !== undefined) next.input_schema = scrubSchema(next.input_schema, patterns);
       kept.push(next);
     }
     if (deferred > 0) changes.push(`defer_loading×${deferred}`);
     if (dropped > 0) changes.push(`server_tools×${dropped}`);
-    if (deferred > 0 || dropped > 0) out.tools = kept;
+    if (patterns.count > 0) changes.push(`pattern×${patterns.count}`);
+    if (deferred > 0 || dropped > 0 || patterns.count > 0) out.tools = kept;
     const toolChoice = record(out.tool_choice);
     if (toolChoice && typeof toolChoice.name === "string" && droppedNames.has(toolChoice.name)) {
       delete out.tool_choice;
       changes.push("tool_choice");
+    }
+    // The instruction text for a dropped tool stays in the prompt unless withdrawn (see the note's
+    // own comment). Appended after the caller's blocks, without cache_control, so the prefix up to
+    // Claude Code's breakpoints is untouched.
+    const note = droppedServerToolNote(droppedNames);
+    if (note) {
+      out.system = appendSystemText(out.system, note);
+      changes.push("server_tool_note");
     }
   }
 

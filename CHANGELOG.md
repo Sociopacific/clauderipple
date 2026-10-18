@@ -1,5 +1,339 @@
 # Changelog
 
+## 0.9.5 — 2026-10-14
+
+### Fixed
+
+- **Routed reasoning models keep their train of thought between tool calls.** The router dropped
+  every translated model's previous reasoning, so on each tool call Muse, GPT and DeepSeek reasoned
+  the whole task again from scratch. Workers took minutes per step, kept re-deriving the same plan,
+  and sometimes stopped with no answer. The model's own reasoning now travels in Claude Code's
+  transcript and goes back to it unchanged, the way OpenCode's and Codex's own clients do it. On four
+  real fixes graded by their hidden tests, Muse Spark 1.3 at xhigh finished in 90–584 seconds, where
+  0.9.4 took up to 13 minutes and twice ran past 30 minutes without finishing. Switching a session
+  to a Claude model still works: the carried reasoning is left out of requests to Anthropic.
+
+## 0.9.4 — 2026-10-14
+
+### Fixed
+
+- **Reasoning models are no longer cut off after five minutes of thinking.** Node's `fetch` dropped a
+  response that sent nothing for 300 seconds. Muse Spark 1.3 at xhigh thinks for minutes in silence
+  on a large context, so long steps failed with 529 at 303–305 seconds and started over. The router
+  now waits up to 15 minutes. OpenCode's own CLI had no such limit, which is why the same model
+  worked there.
+- **OpenCode Go and Zen models get their real context window.** They fell back to the global
+  258,400, so Claude Code compacted DeepSeek V4.1 Flash, GLM-5.3 and Muse Spark 1.3 at a quarter of
+  their 1M windows. The router now reads the window from the same models.dev catalogue OpenCode's
+  CLI uses, and fills models already saved without one.
+- **A ChatGPT account whose limit was reset or topped up is usable again right away.** It stayed
+  "cooling" until the old reset time, so the app could not switch to GPT models.
+- **Adding an OpenAI-compatible provider such as B.ai works.** The connection check asked for one
+  token, which some vendors refuse ("max_tokens must be greater than 2", #57).
+- **The plan limit shows on the band**, and every control's tip shows on hover even when the band
+  is full.
+
+### Changed
+
+- **The band:** Auto is a word that lights when on, instead of a switch. Compact and Clear (with a
+  confirm) sit beside settings. The limit draws as a small gauge and its percent.
+- **Workers read and edit with the dedicated tools.** Generated worker agents are told to read files
+  with Read and change them with Edit, not with `sed`/`cat` through Bash.
+- `/ripple debug` also shows the model, the limit and the host's rate limits.
+
+## 0.9.3 — 2026-10-14
+
+### Fixed
+
+- **Claude workers offer X-High.** Claude's effort ladder stopped at high and max, so X-High could
+  not be picked for Claude in the mod or the dashboard though GPT had it. Opus, Sonnet and Haiku 5.5
+  all take it (#56).
+- **A model ticked after the mod's worker list was saved is usable.** It used to stay off and show
+  as unavailable in the mod (GPT-6 Astra in #56). A worker the list has not seen now starts on.
+  Settings saved before this keep the old reading until the list is changed once.
+- **The plan limit shows in the band on Claude chats.** The desktop Code tab left the mod's rate
+  limits empty, so the limit never appeared even with it switched on. The mod now falls back to the
+  router's figure for the same Claude login, and hides it when that figure is over 15 minutes old.
+- `/ripple-bar` no longer says the band is shown above the prompt when the layout is Minimal, where
+  only the short line under the prompt is drawn (#56).
+- The close button lights as one disc under the pointer instead of drawing a second box around it.
+
+## 0.9.2 — 2026-10-14
+
+### Added
+
+- **The mod shows when keep-warm held your cache.** A successful ping used to be silent, so it was
+  easy to think keep-warm never ran. When you come back, a card now says how many pings kept how
+  many tokens in cache and how long is left. It goes when you send a prompt or close it, and the
+  cold-cache card takes over if the cache expires after all.
+- **Keep-warm per chat.** The band's flame now turns keep-warm on or off for that chat only: a full
+  flame where it is on, an empty one where it is off. Settings is what a new chat starts with.
+  After a restart or resume, a chat follows Settings again.
+
+- **Grok through a Grok subscription.** A new "Grok subscription" provider uses Grok 4.7, 4.7
+  Fast, 4.6 and 4.5 with the Grok CLI's own sign-in (`grok login`), with no API key. It reads the
+  CLI's session and, when the session is about to expire, has the CLI refresh it. Tools,
+  thinking and effort (low…xhigh, per model) work as on the other translated providers. This
+  is the channel the Grok CLI itself talks to, not a published xAI API, so a CLI update can
+  change it. Pay-per-token access with an xAI API key stays under the xAI preset. Thanks @nakjiya (#52).
+
+### Fixed
+
+- An OpenAI-compatible provider's error that echoed the bare token, without its `Bearer` scheme,
+  could show it in the error message. It is now redacted like the full header value (#52).
+- On a two-line mod card, 리플이 sat on the title's line; it now sits at the card's middle.
+
+## 0.9.1 — 2026-10-14
+
+### Added
+
+- **The request log records more of each request** (`logs/requests.jsonl`, #55). Every new field is
+  optional, so older records and readers keep working.
+  - Anthropic's request id or the message id, to match a row to the transcript, subagents included.
+  - Why a request ended before reaching a model, with the right provider instead of `anthropic`.
+  - Whether a call was the auto-mode classifier or a web search.
+  - An explicit `cacheWrite: 0`.
+  - The service tier that was asked for and the one the provider served. This shows whether a Fast
+    request was honoured (#54).
+
+### Fixed
+
+- Saving the mod settings failed on Windows with `EPERM … fsync` since 0.9.0 (#53).
+- "Haiku returned no verdict" appeared now and then. When Haiku breaks the end of its JSON, the
+  verdict's complete fields are now read instead of the whole answer being dropped (#53).
+- A response over 64KiB that arrived in one piece (every compressed answer, for one) lost its usage
+  and stop reason in the request log.
+- Alert cards centre their buttons when the title takes two lines.
+- Ripple Remote no longer lists a resumed session's old halves, and a host restart no longer marks
+  idle sessions as just used.
+
+## 0.9.0 — 2026-10-13
+
+### Added
+
+- **The ripple mod.** A band above the Code tab's prompt shows reasoning effort, context, the
+  cache timer, and which model answered each request with its cache hit. Log opens the request
+  log, ⚙ opens quick settings, and the dashboard has a mod page with every setting.
+- **Effort picked per prompt.** A small judge model (Haiku 5.5 or Jev) reads the prompt and the
+  recent turns, then sets low through max. Pick an effort yourself whenever you want; Auto comes
+  back when you switch it on.
+- **Workers picked per task.** The main chat hands work to `ripple:auto`, and the judge decides
+  how hard each task is and sends it to the matching rung: light work to DeepSeek or GLM, hard work
+  to GPT or Opus. Rungs, candidate models and named modes (prefer or avoid a model, eager
+  delegation, switch off at a quota reset) are set on the dashboard. Every pick is kept in
+  `logs/worker-picks.jsonl`.
+- **Warnings that save tokens.** Cards appear when the prompt cache has gone cold on a big chat,
+  when the context gets heavy, and when a plan window passes 80%. Each card offers compact or a
+  handoff.
+- **Handoff to a fresh session.** A handoff writes a summary and opens a new session in the same
+  folder with it in the prompt box. The current chat is left as it is.
+- **리플이**, the mascot, on the band and every card, acting out what the band is doing. Mod text
+  in six languages, following the Mac's system language.
+- **Artificial Analysis scores** for every routable model, refreshed daily, used to rank worker
+  candidates by measured cost.
+- A provider that answers 402 or says its quota is exhausted is skipped for a while.
+
+### Changed
+
+- Dashboard settings are rebuilt in the style of macOS System Settings.
+- The mod's settings live in the router, so every session follows a change at once.
+
+### Fixed
+
+- Judge-only models such as Jev no longer appear in pickers, worker lists or Codex.
+- The install script works under macOS `/bin/sh` again.
+
+## 0.8.10 — 2026-10-10
+
+### Added
+
+- **Choose which Claude account is used first.** With several Claude accounts, the current Claude
+  login was always tried first. Each account card now has a "Use first" button (Providers →
+  Claude → Accounts). New conversations start on that account, move to the next one when it hits
+  its limit, and return to it once the limit resets. A conversation already running stays on its
+  account to keep its cache.
+
+### Fixed
+
+- **DeepSeek subagents no longer fail with 400 on the Artifact tool.** DeepSeek's Anthropic
+  endpoint rejected Claude Desktop's Artifact tool over a regular expression it cannot compile
+  (`"^[^\0]*$" is not a "regex"`). That pattern is now removed on the way out, as it already was for
+  OpenAI-format providers (#51).
+- **The tray starts again after a Windows restart.** Installed with the install script, the tray
+  was set to open at logon without its own script, so Windows opened a bare Electron instead
+  (#50). Restarting the tray once after updating fixes the entry. `clauderipple tray` now also
+  reports a tray that quits right after starting, with its output in `logs/tray.log`. Running it
+  while a tray is already up no longer adds a second icon.
+- **New ChatGPT models show up without the Codex CLI installed.** OpenAI's model list hides
+  models from older Codex versions, and without a Codex CLI the router asked as 0.155.0, so GPT-6.1
+  Sol never appeared (#50). It now asks as the newest published Codex. New models appear unticked in
+  the ChatGPT provider form.
+
+## 0.8.9 — 2026-10-08
+
+### Fixed
+
+- **New Claude models appear on their own.** The Claude model list was built into ClaudeRipple,
+  so Opus 5.5, Sonnet 5.5 and Haiku 5.5 never showed up. It now comes from Anthropic's model list
+  for your account, refreshed hourly. When a newer model ships in a family you already use (say
+  Opus 5.5 after Opus 5), it is added to your Claude provider on its own. Untick it and it stays
+  unticked.
+
+## 0.8.8 — 2026-10-07
+
+### Fixed
+
+- **Web search works with OpenCode Go's DeepSeek on the small/fast slot.** With that slot on
+  DeepSeek V4.1 Flash, V4 Flash or V4 Pro through OpenCode Go, every `WebSearch` was refused
+  and the Clients screen marked those models "no web search here". The same plan runs the search on
+  its Anthropic endpoint, so the router now sends searches for these models there. Their other
+  requests are unchanged.
+
+## 0.8.7 — 2026-10-07
+
+### Fixed
+
+- **"Enter manually" takes OpenAI-compatible APIs.** The form now asks for the API format
+  (Anthropic Messages, OpenAI Chat Completions or OpenAI Responses). It used to save every hand-entered
+  provider as Anthropic-compatible, so an OpenAI-compatible address failed its connection check with
+  a 404. An OpenAI-compatible provider also fills its model list from `/models`.
+- **Opus 404s after a pause no longer show as errors.** Since Claude Code 2.1.288, a turn after a
+  few idle minutes often comes back 404 `thread_not_found`, and Claude Code resends the conversation
+  at once with the prompt cache intact. Nothing fails, so the log, the line above the prompt and the
+  summary now show such requests as resent, not failed.
+
+## 0.8.6 — 2026-10-07
+
+### Fixed
+
+- **Web search works with a ChatGPT model on the small/fast slot.** With that slot on a ChatGPT
+  model (Luna, say) and no web-search provider set, every `WebSearch` failed as "unavailable",
+  while the Clients screen called ChatGPT searchable. A search sent to a ChatGPT model is now
+  answered by your ChatGPT subscription's own search.
+
+## 0.8.5 — 2026-10-07
+
+### Fixed
+
+- **The ChatGPT provider no longer says Plus/Pro only.** Any ChatGPT plan that includes Codex
+  (Plus, Pro, Business, and Enterprise/Edu with Codex on) signs in the same way; the dashboard
+  now says so in every language.
+
+## 0.8.4 — 2026-10-06
+
+### Added
+
+- **Four more languages.** The dashboard, the tray and the README now come in Simplified
+  Chinese, Japanese, Spanish and Brazilian Portuguese as well as English and Korean. The
+  dashboard follows your browser or OS language; pick another from the selector at the bottom
+  of the sidebar.
+
+### Changed
+
+- **Releases publish themselves.** A version tag now publishes to npm from GitHub Actions, with
+  a signed provenance statement, so fixes reach `clauderipple update` without waiting on anyone.
+
+## 0.8.3 — 2026-10-06
+
+### Fixed
+
+- **No PowerShell window at every Windows logon** (#49). With Windows Terminal as the default
+  terminal — the Windows 11 default — the router task's PowerShell window stayed on screen after
+  each logon, because Windows Terminal ignores `-WindowStyle Hidden`. The task now starts
+  PowerShell inside a headless console host. Updating re-registers the task; where Windows
+  refuses that, the old task is kept and the router runs as before.
+
+## 0.8.2 — 2026-10-06
+
+### Fixed
+
+- **Effort works on API-key providers.** A provider with no effort ladder of its own — DeepSeek,
+  Kimi, GLM, MiniMax, Qwen, Groq, Mistral, or any key and URL — stripped the effort you picked and
+  the Claude app showed no effort menu for its models. ClaudeRipple now asks each such model: it
+  sends a level no vendor defines, and if the endpoint refuses it, the levels it does accept become
+  that model's effort menu. An endpoint that accepts anything is left without effort, since it is
+  not reading the field. Providers you already set up are measured a minute after the router
+  starts; nothing needs re-saving.
+- **DeepSeek's API offers low / high / max**, the three levels its thinking mode maps every
+  request onto.
+
+## 0.8.1 — 2026-10-06
+
+### Fixed
+
+- **Codex credits are spent instead of refused.** Once a ChatGPT plan's window read 100%, the
+  router rested the account until the reset, even though OpenAI serves an account with bought
+  credits past its window. An account with credits (or an unlimited balance) now stays in
+  rotation; a real usage-limit refusal still rests it.
+- **Fewer failed Claude app requests in picker mode.** claude.ai closes idle kept-alive
+  connections, and a request written on one as it closed came back as a 502 (about 65 a day
+  here, mostly the app's start-up requests). A GET, HEAD or OPTIONS that meets such a socket is
+  now sent again; a POST is not.
+- **Picker mode on a new Mac.** The ClaudeRipple CA counted as trusted when it was merely in the
+  login keychain, so `picker on` could skip the trust step and leave Claude Desktop unable to
+  load claude.ai. Trust is now read from the user trust settings, and `picker off` removes the
+  certificate either way.
+- **The route band said "router not answering"** on Claude Code 2.1.288, which sends plain
+  `http://` requests through the proxy too and got 405. They are now relayed.
+
+### Docs
+
+- Any ChatGPT plan that includes Codex works (Plus, Pro, Business; Enterprise/Edu with Codex
+  turned on), not just Plus and Pro.
+- `ultra` effort is sent as `max`: the Codex backend refuses `ultra` (measured), and Codex's own
+  ultra is max reasoning plus its sub-agents, which in Claude Code are Claude Code's subagents.
+
+## 0.8.0 — 2026-10-05
+
+### Added
+
+- **The route, where you type** (Claude Code mods; a switch on the Clients screen, or
+  `clauderipple mod on`). A line above the Claude Code prompt says where your last request
+  went: model, provider, effort, cache hit and time, colored by provider and result. `Log` or
+  `/ripple-log` opens the request log in a side pane, all sessions or just this one; `×` or
+  `/ripple-bar` puts the line away. The router now records which Claude Code session sent each
+  request (`X-Claude-Code-Session-Id`), and `/api/requests?session=` filters by it.
+- **Workers stay on their own model.** The same mod catches a `model` argument on an Agent call
+  that would have put a ClaudeRipple worker on a Claude alias (its output cut to 64 tokens) and
+  runs it on its own model, and reads a `[[ripple: name@level]]` marker wherever it sits in the
+  prompt, not only on the first line.
+- **Google Gemini**, on its own wire: an AI Studio key, or a Google account through the
+  Antigravity backend with several accounts in rotation. Google's terms name the account route
+  as a breach and accounts were suspended for it; the sign-in says so before it starts.
+- **Each routed model gets its own effort menu in the Claude app.** DeepSeek and GLM show
+  low/high/max instead of Claude's whole ladder; a model that takes no effort shows none.
+- **Fast mode on GPT.** `/fast` in Claude Code asks the ChatGPT backend for the Codex fast tier.
+- **Updates from the dashboard**: the version row checks and starts an update.
+- **A typed model ID** for a provider that lists no models (#42).
+- **An explicit Auto mode classifier target** (`autoModeClassifier`, JSON only; #43 by
+  @Sociopacific). The README says what pointing it at a weaker model gives up.
+
+### Changed
+
+- **Measuring an OpenCode provider takes one request per model**, its effort ladder read from
+  models.dev, four models at a time, instead of about ten sequential requests each (three
+  OpenCode Go models had taken 2m33s). The ladders are the catalogue's: glm-5.3-flash is
+  low/high/max, where requests had accepted seven levels.
+- **Generated workers run at `@high`** unless a marker says otherwise.
+- **A clamping tie goes up**: medium on a low/high/max model is high, not low.
+
+### Fixed
+
+- **A settings save no longer undoes what the router wrote.** The dashboard saved the whole
+  config from the copy it loaded when it opened, so measured ladders and hand edits came back
+  with the next unrelated save. Every save now starts from the router's current config.
+- **Routed workers are no longer told to call `advisor`** after the tool was dropped (#47, #48
+  by @115dkk).
+- **`claude-login` finds the Desktop-cached CLI** in its new `<version>/<hash>/` folder (#45,
+  #46 by @115dkk). macOS had the same layout.
+- **Codex context overflow** is answered as "prompt is too long", so Claude Code compacts
+  instead of retrying the same request (#44 by @Sociopacific); a stream held for that opens
+  after five seconds regardless.
+- The Codex app sees a GPT model released after the router started; subagent titles keep the
+  model and effort under Desktop's new task panel; a provider's connection test reads a
+  model-not-found 404 as an accepted key; a Gemini provider waiting on Google's verification
+  is not shown as connected, and the page to open is passed on.
+
 ## 0.7.0 — 2026-09-29
 
 ### Added

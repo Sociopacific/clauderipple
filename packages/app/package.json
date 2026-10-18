@@ -1,6 +1,6 @@
 {
   "name": "@clauderipple/app",
-  "version": "0.7.0",
+  "version": "0.9.5",
   "private": true,
   "description": "ClaudeRipple menu-bar app (macOS). Hosts the local GUI served by the router and shows chain health in the tray.",
   "license": "GPL-3.0-only",
@@ -60,6 +60,14 @@
       {
         "from": "../ui",
         "to": "clauderipple/packages/ui"
+      },
+      {
+        "from": "../mod",
+        "to": "clauderipple/packages/mod",
+        "filter": [
+          "**/*",
+          "!.claude-plugin/types/**"
+        ]
       },
       {
         "from": "../../LICENSE",

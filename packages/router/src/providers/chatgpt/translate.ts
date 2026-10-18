@@ -3,12 +3,16 @@
 // Prompt-cache rule: the Responses `input` we build must be a byte-stable prefix of the
 // next turn's `input`. Claude Code resends the whole history every turn, so the mapping
 // has to be deterministic and must not inject anything that varies (timestamps, salts,
-// re-signed reasoning). Thinking blocks from earlier assistant turns are dropped for the
-// same reason. `prompt_cache_key` is derived from the conversation's first user message — or,
+// re-signed reasoning). A reasoning item that came back from the backend is the exception
+// that proves the rule: it is put back exactly as it arrived, so the bytes are the
+// backend's own, and a turn that carried one maps the same way every time. Thinking
+// blocks with no stored item still have nothing to put back and are dropped as before.
+// `prompt_cache_key` is derived from the conversation's first user message — or,
 // for a request that is not a conversation at all, from its system prompt (see `conversationKey`).
 
 import crypto from "node:crypto";
 import { identityLine } from "../../identity.ts";
+import { encodeEnvelope, envelopeFor, isOurSignature, replayableReasoning, type Envelope, type ReplayedReasoning } from "../../reasoning.ts";
 
 // ---- Anthropic side -----------------------------------------------------------------
 
@@ -35,6 +39,7 @@ export type AnthropicRequest = {
   max_tokens?: number;
   output_config?: { effort?: string };
   metadata?: { user_id?: string };
+  speed?: string;
   [k: string]: unknown;
 };
 
@@ -43,7 +48,8 @@ export type AnthropicRequest = {
 export type ResponsesInputItem =
   | { type: "message"; role: "user" | "assistant"; content: ({ type: "input_text" | "output_text"; text: string } | { type: "input_image"; image_url: string })[] }
   | { type: "function_call"; call_id: string; name: string; arguments: string }
-  | { type: "function_call_output"; call_id: string; output: string };
+  | { type: "function_call_output"; call_id: string; output: string }
+  | ReplayedReasoning;
 
 export type ResponsesRequest = {
   model: string;
@@ -53,11 +59,18 @@ export type ResponsesRequest = {
   tool_choice?: "auto" | "none" | "required" | { type: "function"; name: string };
   parallel_tool_calls?: boolean;
   reasoning: { effort: string; summary: "auto" };
+  /**
+   * `reasoning.encrypted_content` is what the backend seals a reasoning item into; asking for it is
+   * what lets the conversation carry its own reasoning back (see reasoning.ts). Codex's own requests
+   * carry it on every turn, and so does this adapter; only the retry after a refusal leaves it off.
+   */
+  include?: "reasoning.encrypted_content"[];
   text: { verbosity: "medium" };
   store: false;
   stream: true;
   prompt_cache_key: string;
-  service_tier?: "default" | "fast" | "priority";
+  /** Fast uses priority on the wire; a provider may explicitly select the default tier. */
+  service_tier?: "default" | "priority";
   /** Who this turn belongs to, in the shape the Codex CLI sends — see `conversationId`. */
   client_metadata: { session_id: string; thread_id: string; turn_id: string; "x-codex-window-id": string };
 };
@@ -68,6 +81,28 @@ export type TranslateOptions = {
   effort: string;
   identity: boolean;
   instructionsAppend?: string;
+  /**
+   * Carry the conversation's reasoning back to the backend (see reasoning.ts). Default true — this is
+   * the native shape. A false value is the retry after a backend refused the carrier: no replayed
+   * items and no `include`, which is exactly the request this adapter sent before they existed.
+   */
+  replay?: boolean;
+  /**
+   * The provider and model this request is going to. The envelope names where a piece of reasoning
+   * came from, and reasoning is only replayed into the place that made it: a sealed blob minted by
+   * another model, or on another account, is the one thing a 400 is reliably about (see reasoning.ts).
+   */
+  env?: { p: string; m: string };
+  /** Filled in as the input is built: how many items were replayed, and how many were unreadable. */
+  carried?: { replayed: number; undecodable: number };
+  /** Names the reason a carrier was dropped. Absent in tests, where the counts are enough. */
+  log?: (line: string) => void;
+  /**
+   * Called as each replayed item is placed, with the tool call it arrived immediately after (the one
+   * it describes). The response path uses that to know which `response.output_item` carried it, so a
+   * fresh reasoning for the turn can be addressed to the same place next time.
+   */
+  onArrival?: (item: ReplayedReasoning, afterCallId: string | undefined) => void;
 };
 
 function blockText(c: string | AnthropicBlock[] | undefined): string {
@@ -176,13 +211,17 @@ export function unsupportedPattern(p: string): boolean {
   return UNSUPPORTED_REGEX.test(p);
 }
 
-function scrubSchema(node: unknown): unknown {
-  if (Array.isArray(node)) return node.map(scrubSchema);
+/** Drops the patterns above anywhere in a schema; `removed.count` says how many went. */
+export function scrubSchema(node: unknown, removed?: { count: number }): unknown {
+  if (Array.isArray(node)) return node.map((item) => scrubSchema(item, removed));
   if (typeof node !== "object" || node === null) return node;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-    if (k === "pattern" && typeof v === "string" && unsupportedPattern(v)) continue;
-    out[k] = scrubSchema(v);
+    if (k === "pattern" && typeof v === "string" && unsupportedPattern(v)) {
+      if (removed) removed.count++;
+      continue;
+    }
+    out[k] = scrubSchema(v, removed);
   }
   return out;
 }
@@ -220,10 +259,11 @@ export function toolNameForResponses(name: string): string {
 // worst failure shape there is. `compat.ts` has dropped them on the anthropic-compatible path from
 // the start; the rule belongs here too, and is the same rule, not a second one.
 //
-// These do not arrive today. Claude Code runs its web search as a separate side request on a fixed
-// small model — measured 2026-09-17: an Opus session and a DeepSeek-routed session both sent it to
-// `claude-haiku-4-5`, which passes through to Anthropic and never reaches an adapter. Which model
-// that is, is a server-side flag we do not own, so this guards the day it changes.
+// `web_search` does not arrive today. Claude Code runs its web search as a separate side request on a
+// fixed small model — measured 2026-09-17: an Opus session and a DeepSeek-routed session both sent it
+// to `claude-haiku-4-5`, which passes through to Anthropic and never reaches an adapter. Which model
+// that is, is a server-side flag we do not own, so this guards the day it changes. The `advisor`
+// server tool does arrive: see `droppedServerToolNote`.
 export function isServerTool(tool: AnthropicTool): boolean {
   const type = (tool as { type?: unknown }).type;
   return type !== undefined && type !== "custom";
@@ -234,6 +274,27 @@ export function serverToolNames(tools: AnthropicTool[] | undefined): Set<string>
   const names = new Set<string>();
   for (const t of tools ?? []) if (typeof t.name === "string" && isServerTool(t)) names.add(t.name);
   return names;
+}
+
+// Dropping the declaration is half of it (issue #47). Claude Code also tells the model, in text, how
+// to use the tool: the advisor comes with an `isMeta` user message ("# Advisor Tool / You have access
+// to an `advisor` tool…") on every subagent, whatever its `tools:` list says (CLI 2.1.286, measured
+// 2026-10-04: `dropped server tools for gpt-6-astra: advisor` on every worker request). A routed
+// worker reads the instruction, finds no such tool, and says so in each report. The CLI withdraws its
+// own instruction with one line when it removes the tool ("The advisor tool is no longer available;
+// disregard the earlier advisor instructions."); a line does the same here, without matching wording
+// that changes from release to release. Sorted, so one set always yields the same bytes and the
+// cached prefix does not move.
+/** One line withdrawing the instructions for the server tools a request had to drop; "" when none. */
+export function droppedServerToolNote(dropped: Set<string>): string {
+  if (dropped.size === 0) return "";
+  const names = [...dropped].sort().map((n) => `\`${n}\``).join(", ");
+  return `Not available in this session: ${names}. Anthropic runs these tools on its own servers, so this model cannot call them. Disregard any instruction to use them and carry on without them; there is no need to mention that they are missing.`;
+}
+
+/** The caller's system text with that line after it, so every translator places it the same way. */
+export function systemWithDroppedToolNote(req: AnthropicRequest): string {
+  return [systemText(req.system), droppedServerToolNote(serverToolNames(req.tools))].filter(Boolean).join("\n\n");
 }
 
 /**
@@ -256,7 +317,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   // Effort is named here because the model cannot see its own reasoning setting and will otherwise guess.
   // Constant per (model, effort): changing effort mid-session costs one cache miss, which is acceptable.
   if (opts.identity) parts.push(identityLine(opts.model, opts.effort));
-  const sys = systemText(req.system);
+  const sys = systemWithDroppedToolNote(req);
   if (sys) parts.push(sys);
   if (opts.instructionsAppend) parts.push(opts.instructionsAppend);
 
@@ -266,6 +327,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   // whose call_id has no function_call in the same input ("No tool call found…", measured 2026-09-13).
   // Such results are sent as plain user text instead.
   const knownCalls = new Set<string>();
+  let lastCallId: string | undefined;
   for (const m of req.messages) {
     const role: "user" | "assistant" = m.role === "assistant" ? "assistant" : "user";
     if (typeof m.content === "string") {
@@ -279,6 +341,30 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
       pending = [];
     };
     for (const b of m.content) {
+      // The reasoning this turn came back with, put back exactly where it was: the CLI replays the
+      // block in front of the function calls it belongs to, so iterating in order reproduces the
+      // original positions, parallel calls included. `lastCallId` is the call the carrier arrived
+      // after — the response path addresses the next turn's summary to it (see `onArrival`) — and is
+      // undefined for a lead-in item, which is where such a summary belongs.
+      const decoded = envelopeFor(b, "responses", opts.env, (reason) => {
+        (opts.carried ?? (opts.carried = { replayed: 0, undecodable: 0 })).undecodable++;
+        if (opts.replay !== false) opts.log?.(`dropped a reasoning carrier: ${reason}`);
+      });
+      // A carrier for the other wire is not ours to touch and falls through to the drop below.
+      if (decoded) {
+        if (opts.replay !== false) {
+          const item = replayableReasoning(decoded.r);
+          if (item) {
+            flush();
+            input.push(item);
+            (opts.carried ?? (opts.carried = { replayed: 0, undecodable: 0 })).replayed++;
+            opts.onArrival?.(item, lastCallId);
+          } else {
+            (opts.carried ?? (opts.carried = { replayed: 0, undecodable: 0 })).undecodable++;
+          }
+        }
+        continue;
+      }
       switch (b.type) {
         case "text": {
           const t = (b as { text: string }).text;
@@ -297,6 +383,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
           flush();
           const tu = b as { id: string; name: string; input: unknown };
           knownCalls.add(tu.id);
+          lastCallId = tu.id;
           input.push({ type: "function_call", call_id: tu.id, name: toolNameForResponses(tu.name), arguments: typeof tu.input === "string" ? tu.input : JSON.stringify(tu.input ?? {}) });
           break;
         }
@@ -313,7 +400,8 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
           break;
         }
         default:
-          // thinking / redacted_thinking / unknown: dropped on purpose (see header comment)
+          // thinking, an unmarked redacted_thinking, anything unknown: no stored item to put back,
+          // so dropped as before (see header comment)
           break;
       }
     }
@@ -348,11 +436,18 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     ...(opts.serviceTier ? { service_tier: opts.serviceTier === "fast" ? "priority" : opts.serviceTier } : {}),
     client_metadata: { session_id: conversationId(req), thread_id: conversationId(req), turn_id: crypto.randomUUID(), "x-codex-window-id": `${conversationId(req)}:0` },
   };
+  // On every turn, as Codex asks. With `store: false` the backend keeps nothing, and without
+  // `include` it hands back no sealed item either — so a conversation that waited until it already
+  // carried reasoning before asking would never carry any. Only the retry after a refusal leaves it off.
+  if (opts.replay !== false) out.include = ["reasoning.encrypted_content"];
   if (tools.length > 0) {
     out.tools = tools;
     out.parallel_tool_calls = !(tc?.disable_parallel_tool_use ?? false);
   }
   if (tool_choice) out.tool_choice = tool_choice;
+  // Claude Code's `/fast` arrives as `speed: "fast"` (Anthropic fast mode). The ChatGPT backend's
+  // equivalent is the Codex CLI's Fast mode, which bills the plan at a higher rate (Codex docs, Speed).
+  if (req.speed === "fast") out.service_tier = "priority";
   return out;
 }
 
@@ -377,10 +472,12 @@ export type AnthropicEvent = { event: string; data: Record<string, unknown> };
 export class StreamMapper {
   private started = false;
   private blockIndex = -1;
-  private open: { kind: "text" | "thinking" | "tool"; itemId?: string } | null = null;
+  /** `signed` marks a thinking block that already carries its signature — the envelope we wrote. */
+  private open: { kind: "text" | "thinking" | "tool"; itemId?: string; signed?: boolean } | null = null;
   private sawToolCall = false;
   private finished = false;
   readonly messageId: string;
+  servedTier: string | undefined;
   readonly model: string;
   usage: AnthropicUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   /** Latest `codex.rate_limits` payload, if the backend sent one. */
@@ -388,6 +485,15 @@ export class StreamMapper {
   /** Accumulated content for non-streaming responses. */
   readonly content: ({ type: "text"; text: string } | { type: "thinking"; thinking: string; signature: string } | { type: "tool_use"; id: string; name: string; input: unknown; _args?: string })[] = [];
   stopReason: "end_turn" | "tool_use" | "max_tokens" = "end_turn";
+  /**
+   * How many reasoning items this response carried whole — the ones the client will replay. The
+   * `reasoning=` figure the request log shows next to `replayed=`.
+   */
+  reasoningCount = 0;
+  /** The reasoning item being assembled: its identity so far and the call it followed. */
+  private pendingReasoning: { id?: string; summary?: unknown; encrypted?: string; text: string; callId: string | undefined } | null = null;
+  /** The most recent function_call item added, which is what a following reasoning item describes. */
+  private lastCallId: string | undefined;
 
   /** Input-token figure announced in message_start (the real one only arrives with response.completed). */
   private readonly startInput: number;
@@ -395,10 +501,18 @@ export class StreamMapper {
   /** Mangled tool name → the name Claude Code knows, from `toolNameRestoreMap`. */
   private readonly toolNames: ReadonlyMap<string, string>;
 
-  constructor(model: string, startInput = 0, toolNames: ReadonlyMap<string, string> = new Map()) {
+  /**
+   * The provider name that goes in each reasoning envelope (see reasoning.ts). A blob sealed here is
+   * only sent back here: reasoning outlives the request that made it, and a conversation moved to
+   * another provider must not carry this one's sealed state with it.
+   */
+  private readonly provider: string;
+
+  constructor(model: string, startInput = 0, toolNames: ReadonlyMap<string, string> = new Map(), provider = "") {
     this.model = model;
     this.startInput = startInput;
     this.toolNames = toolNames;
+    this.provider = provider;
     this.messageId = `msg_${crypto.randomBytes(12).toString("hex")}`;
   }
 
@@ -407,7 +521,7 @@ export class StreamMapper {
   }
 
   /** The error `fail` reported, so a non-streaming caller can answer with it instead of a 200. */
-  failure: { type: string; message: string } | undefined;
+  failure: { type: string; message: string; code?: string } | undefined;
 
   start(): AnthropicEvent[] {
     if (this.started) return [];
@@ -427,10 +541,16 @@ export class StreamMapper {
     ];
   }
 
+  /**
+   * A thinking block must carry a signature even when there is none to give — an unsigned one is
+   * refused the moment the session moves to a Claude model (`thinking.ts`) — so a block that was
+   * opened without one gets an empty `signature_delta` as it closes. A block that already carries
+   * the envelope is left alone: a second, empty delta would replace it on the client.
+   */
   private closeBlock(): AnthropicEvent[] {
     if (!this.open) return [];
     const evs: AnthropicEvent[] = [];
-    if (this.open.kind === "thinking") evs.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "signature_delta", signature: "" } } });
+    if (this.open.kind === "thinking" && !this.open.signed) evs.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "signature_delta", signature: "" } } });
     evs.push({ event: "content_block_stop", data: { type: "content_block_stop", index: this.blockIndex } });
     this.open = null;
     return evs;
@@ -444,6 +564,53 @@ export class StreamMapper {
     return evs;
   }
 
+  /**
+   * Finish the reasoning item being assembled and hand the client the block that carries it: a
+   * thinking block whose text is the summary (empty when the backend sent none — measured
+   * 2026-10-14: Claude Code keeps and replays such a block, signature and all) and whose signature
+   * is the envelope around the sealed reasoning.
+   *
+   * An item with nothing sealed is only worth its summary, and then only if it has one: there is
+   * nothing to replay, and an empty thinking block is refused by Anthropic the moment the session
+   * switches to a Claude model (`thinking.ts`).
+   */
+  private sealReasoning(): AnthropicEvent[] {
+    const pending = this.pendingReasoning;
+    if (!pending) return [];
+    this.pendingReasoning = null;
+    const text = pending.text.trim() || (typeof pending.summary === "string" ? pending.summary.trim() : "");
+    const events: AnthropicEvent[] = [];
+    if (!pending.encrypted) {
+      if (text) {
+        events.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }));
+        events.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "thinking_delta", thinking: text } } });
+        events.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "signature_delta", signature: "" } } });
+        events.push(...this.closeBlock());
+        this.content.push({ type: "thinking", thinking: text, signature: "" });
+      }
+      return events;
+    }
+    const item: ReplayedReasoning = { type: "reasoning", encrypted_content: pending.encrypted };
+    if (pending.id) item.id = pending.id;
+    if (Array.isArray(pending.summary)) item.summary = pending.summary;
+    const signature = encodeEnvelope(this.envelopeFor(item));
+    events.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }));
+    if (text) events.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "thinking_delta", thinking: text } } });
+    // The signature must arrive on this very block: it is the carrier, and the client keeps the block
+    // whole or not at all. It goes last, after the text, which is the order Anthropic's own blocks use.
+    events.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "signature_delta", signature } } });
+    if (this.open) this.open.signed = true;
+    events.push(...this.closeBlock());
+    this.content.push({ type: "thinking", thinking: text, signature });
+    this.reasoningCount++;
+    return events;
+  }
+
+  /** Where this item's envelope says it came from — this adapter's own provider and model. */
+  private envelopeFor(item: ReplayedReasoning): Envelope {
+    return { w: "responses", p: this.provider, m: this.model, r: item as unknown as Record<string, unknown> };
+  }
+
   /** Map one upstream event. Returns Anthropic events to emit (possibly none). */
   feed(ev: Record<string, unknown>): AnthropicEvent[] {
     const type = ev.type as string;
@@ -453,18 +620,29 @@ export class StreamMapper {
         this.rateLimits = ev;
         break;
       case "response.output_item.added": {
-        const item = ev.item as { type: string; call_id?: string; name?: string; id?: string };
+        const item = ev.item as { type: string; call_id?: string; name?: string; id?: string; encrypted_content?: unknown; summary?: unknown };
         if (item.type === "function_call") {
           this.sawToolCall = true;
           const id = item.call_id ?? item.id ?? `call_${crypto.randomBytes(8).toString("hex")}`;
           // The model echoes the mangled name; Claude Code only recognises the original.
           const called = item.name ?? "tool";
           const name = this.toolNames.get(called) ?? called;
+          this.lastCallId = id;
           this.content.push({ type: "tool_use", id, name, input: {}, _args: "" });
           out.push(...this.openBlock("tool", { type: "tool_use", id, name, input: {} }, item.id));
         } else if (item.type === "reasoning") {
-          this.content.push({ type: "thinking", thinking: "", signature: "" });
-          out.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }, item.id));
+          // The item's reasoning is held until it is complete and handed over whole (see
+          // `sealReasoning`): one thinking block whose signature carries the envelope. The summary,
+          // when the backend sends one, is that block's text — and the summary deltas below fill it
+          // in. Passing the summary through `openBlock` here as well would split one item across two
+          // blocks, so this opens nothing.
+          this.pendingReasoning = {
+            ...(item.id ? { id: item.id } : {}),
+            ...(typeof item.encrypted_content === "string" && item.encrypted_content ? { encrypted: item.encrypted_content } : {}),
+            ...(item.summary !== undefined ? { summary: item.summary } : {}),
+            text: "",
+            callId: this.lastCallId,
+          };
         } else if (item.type === "message") {
           this.content.push({ type: "text", text: "" });
           out.push(...this.openBlock("text", { type: "text", text: "" }, item.id));
@@ -485,6 +663,13 @@ export class StreamMapper {
       case "response.reasoning_summary_text.delta":
       case "response.reasoning_text.delta": {
         const delta = String(ev.delta ?? "");
+        // The summary is the text of the reasoning item's block, and that block also carries the
+        // envelope — both are written when the item is done, so the block is not opened here. One
+        // item is one block; streaming the text into a block of its own would hand the client two.
+        if (this.pendingReasoning) {
+          this.pendingReasoning.text += delta;
+          break;
+        }
         if (!this.open || this.open.kind !== "thinking") {
           this.content.push({ type: "thinking", thinking: "", signature: "" });
           out.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }));
@@ -515,12 +700,22 @@ export class StreamMapper {
         break;
       }
       case "response.output_item.done": {
+        const done = ev.item as { type?: unknown; encrypted_content?: unknown; summary?: unknown } | undefined;
+        // The backend may put `encrypted_content` only on the completed item, so the seal is taken
+        // here as well as from `response.output_item.added`, and the item is only handed over now
+        // anyway — a half-assembled reasoning block must not reach the client.
+        if (done?.type === "reasoning" && this.pendingReasoning) {
+          if (typeof done.encrypted_content === "string" && done.encrypted_content) this.pendingReasoning.encrypted = done.encrypted_content;
+          if (done.summary !== undefined) this.pendingReasoning.summary = done.summary;
+        }
         out.push(...this.closeBlock());
+        out.push(...this.sealReasoning());
         break;
       }
       case "response.completed":
       case "response.incomplete": {
-        const r = ev.response as { usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } }; incomplete_details?: { reason?: string } } | undefined;
+        const r = ev.response as { service_tier?: unknown; usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } }; incomplete_details?: { reason?: string } } | undefined;
+        if (typeof r?.service_tier === "string") this.servedTier = r.service_tier;
         const u = r?.usage;
         if (u) {
           const cached = u.input_tokens_details?.cached_tokens ?? 0;
@@ -566,7 +761,7 @@ export class StreamMapper {
     const contextOverflow = code === "context_length_exceeded" || /input exceeds the context window/i.test(message);
     const type = contextOverflow ? "invalid_request_error" : code === "server_is_overloaded" ? "overloaded_error" : code === "rate_limit_exceeded" || code === "usage_limit_reached" ? "rate_limit_error" : "api_error";
     if (contextOverflow) message = `prompt is too long: ${message}`;
-    this.failure = { type, message };
+    this.failure = { type, message, ...(code ? { code } : {}) };
     return [...this.start(), ...this.closeBlock(), { event: "error", data: { type: "error", error: { type, message } } }];
   }
 

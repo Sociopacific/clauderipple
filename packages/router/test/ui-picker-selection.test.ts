@@ -45,6 +45,76 @@ function loadGroupedModels(): (config: Config) => { name: string }[] {
   return new Function(`${source.slice(start, end)}; return groupedModels;`)() as (config: Config) => { name: string }[];
 }
 
+test("live provider exhaustion beats a green connection probe and disappears after recovery", () => {
+  const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui/app.js");
+  const source = fs.readFileSync(file, "utf8");
+  const start = source.indexOf("function providerConnection(");
+  const end = source.indexOf("function providerState(");
+  const status: { providers: Record<string, { reachable: boolean; exhaustion?: { reason: string; until: number } }> } = { providers: { p: { reachable: true, exhaustion: { reason: 'insufficient_balance', until: Date.now() + 60_000 } } } };
+  const make = new Function('status', 'stateFor', 'probeIsStale', 't', `${source.slice(start, end)}; return providerConnection;`) as (status: unknown, state: () => unknown, stale: () => boolean, t: (s: string) => string) => (name: string) => { level: string; text: string };
+  const connection = make(status, () => ({ ok: true }), () => false, key => key);
+  assert.equal(connection('p').level, 'warn');
+  assert.match(connection('p').text, /insufficient balance/);
+  delete status.providers.p!.exhaustion;
+  assert.equal(connection('p').level, 'ok');
+});
+
+test("mode reset needs a known future timestamp; Claude uses its binding window", () => {
+  const source = fs.readFileSync(new URL('../../ui/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function modQuotaKnown('), source.indexOf('async function modLoadResets('));
+  const known = new Function(`${code}; return modQuotaKnown;`)() as (accounts: unknown[], binding?: boolean) => boolean;
+  const window = (used_percent: number, seconds: number) => ({ used_percent, reset_at: Date.now() / 1000 + seconds });
+  assert.equal(known([{ state: 'ready', quota: null }]), false);
+  assert.equal(known([{ state: 'paused', quota: { rate_limits: { primary: window(90, 600) } } }]), false);
+  const accounts = [{ quota: { rate_limits: { primary: window(90, -10), secondary: window(20, 600) } } }];
+  assert.equal(known(accounts), true);
+  assert.equal(known(accounts, true), false);
+  accounts[0]!.quota.rate_limits.primary = window(90, 600);
+  assert.equal(known(accounts, true), true);
+});
+
+test("mode editor keeps reset disabled with an adjacent reason, and enabled controls omit disabled", () => {
+  const source = fs.readFileSync(new URL('../../ui/app.js', import.meta.url), 'utf8');
+  type Node = { tag: string; attrs: Record<string, unknown>; children: Node[]; value: string; addEventListener: () => void; appendChild: (child: Node) => void; setAttribute: (key: string, value: string) => void; querySelector: (selector: string) => Node | undefined };
+  const find = (node: Node, key: string): Node | undefined => node.attrs['data-key'] === key ? node : node.children.map(child => find(child, key)).find(Boolean);
+  const el = (tag: string, attrs: Record<string, unknown> = {}, children: Node[] = []): Node => ({ tag, attrs, children, value: '', addEventListener() {}, appendChild(child) { this.children.push(child); }, setAttribute(key, value) { this.attrs[key] = value; }, querySelector(selector) { return find(this, /data-key="([^"]+)"/.exec(selector)?.[1] ?? ''); } });
+  const segment = source.slice(source.indexOf('function modSegmented('), source.indexOf('/** A pop-up menu.'));
+  const section = source.slice(source.indexOf('function modModeSection('), source.indexOf('function modWorkersCard('));
+  const build = new Function('el', 'known', 'until', `
+    const t = (key, vars) => vars ? key + JSON.stringify(vars) : key, modState = {settings:{}};
+    const modResetProviders = known ? ['chatgpt', 'anthropic'] : [], modRungRows = () => [];
+    const modResetLabel = provider => provider === 'anthropic' ? 'Claude' : 'ChatGPT', modResetDefault = () => modResetProviders[0];
+    const modSelect = (key, items, value, label) => el('select', { 'data-key': key, items, value, 'aria-label': label });
+    const modUpdateMode = () => {}, modSetActive = () => {}, modRemoveMode = () => {}, modLocalTime = () => '';
+    const cell = (label, controls, help) => el('cell', { help }, Array.isArray(controls) ? controls : [controls]);
+    const modSection = (title, rows) => el('section', {}, rows);
+    ${segment}\n${section}\nreturn modModeSection({id:'test',name:'Test',rungs:{},until:until ?? 'none',delegation:'normal'});
+  `) as (make: typeof el, known: boolean, until?: unknown) => Node;
+  const disabled = build(el, false);
+  const reset = find(disabled, 'mode-until:reset')!;
+  assert.equal(Object.hasOwn(reset.attrs, 'disabled'), true);
+  assert.equal(reset.attrs['aria-describedby'], 'mode-reset-reason');
+  const until = disabled.children.find(row => row.children.some(control => control.children.some(child => child.attrs.role === 'radiogroup' && child.attrs['aria-label'] === 'mod.modeUntil')))!;
+  const group = until.children[0]!.children[0]!;
+  assert.equal(group.children.at(-1)?.attrs.id, 'mode-reset-reason');
+  assert.equal(group.children.at(-1)?.attrs.text, 'mod.modeResetUnknown');
+  assert.equal(Object.hasOwn(find(disabled, 'mode-until:time')!.attrs, 'disabled'), false);
+  assert.equal(Object.hasOwn(find(build(el, true), 'mode-until:reset')!.attrs, 'disabled'), false);
+  assert.equal(find(build(el, true), 'mode-until-reset'), undefined);
+  // Reset names its provider: a menu of the known ones, and the line under 종료 시점 names the chosen one.
+  const claude = build(el, true, { reset: 'anthropic' });
+  const select = find(claude, 'mode-until-reset')!;
+  assert.equal(select.attrs.value, 'anthropic');
+  assert.deepEqual((select.attrs.items as { value: string; label: string }[]).map(item => [item.value, item.label]), [
+    ['chatgpt', 'mod.modeUntilResetOf{"provider":"ChatGPT"}'], ['anthropic', 'mod.modeUntilResetOf{"provider":"Claude"}'],
+  ]);
+  const help = (node: Node): unknown => node.attrs.help ?? node.children.map(help).find(Boolean);
+  assert.equal(help(claude), 'mod.modeResetHelp{"provider":"Claude"}');
+  // A saved provider whose reset is not known now stays chosen, marked unavailable.
+  const gone = find(build(el, false, { reset: 'chatgpt' }), 'mode-until-reset')!;
+  assert.deepEqual((gone.attrs.items as { value: string; label: string }[]).map(item => [item.value, item.label]), [['chatgpt', 'mod.modeUntilResetOf{"provider":"ChatGPT"}mod.unavailable']]);
+});
+
 const { applyPickerSelections: apply, pickerSelectionsExcept: except } = loadPickerBlock();
 const groups = loadGroupedModels();
 
@@ -191,4 +261,18 @@ test("an id two providers offer is owned by the rule that says which deal was me
   config.providers.openrouter!.models = [{ id: "z-ai/glm-5.3-flash", name: "GLM" }, { id: "deepseek-v4.1-flash" }];
   config.direct!.push({ prefix: "deepseek-v4.1-flash", provider: "openrouter" });
   assert.equal(except(config, "chatgpt").find((entry) => entry.id === "deepseek-v4.1-flash")?.provider, "openrouter");
+});
+
+test("a Grok form's check keeps what is ticked now; only a new provider's first listing ticks everything", () => {
+  const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui/app.js"), "utf8");
+  const start = source.indexOf("function grokTickedAfterCheck");
+  const end = source.indexOf("}", start) + 1;
+  assert.ok(start > 0, "app.js no longer contains grokTickedAfterCheck");
+  const ticked = new Function(`${source.slice(start, end)}; return grokTickedAfterCheck;`)() as (first: boolean, tickedIds: string[], listedIds: string[]) => Set<string>;
+  const listing = ["grok-4.7", "grok-4.7-fast", "grok-4.6", "grok-4.5"];
+  assert.deepEqual([...ticked(true, [], listing)], listing, "a new provider starts with every model");
+  // The user unticked two models; a re-check — of a new or a saved provider — leaves them unticked.
+  assert.deepEqual([...ticked(false, ["grok-4.7", "grok-4.5"], listing)], ["grok-4.7", "grok-4.5"]);
+  assert.deepEqual([...ticked(false, [], listing)], [], "all unticked stays all unticked");
+  assert.deepEqual([...ticked(false, ["my-custom"], listing)], ["my-custom"], "a custom model the user added stays ticked");
 });

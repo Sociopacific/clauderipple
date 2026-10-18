@@ -8,6 +8,7 @@
 //   dist/cli/src/index.js        the CLI, and with it the supervisor and installer
 //   dist/router/src/index.js     the router
 //   dist/ui/                     the dashboard, served by the router's admin API
+//   dist/mod/                    the status mod, a plugin folder Claude Code loads
 //   dist/app/dist/main.js        the tray, with dist/app/assets next to it as it expects
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -23,6 +24,20 @@ execFileSync(npm, ["exec", "--", "tsc", "-p", "tsconfig.build.json"], { cwd: roo
 execFileSync(npm, ["--workspace", "@clauderipple/app", "run", "build"], { cwd: root, stdio: "inherit" });
 
 fs.cpSync(path.join(root, "packages", "ui"), path.join(dist, "ui"), { recursive: true });
+// Host runtime metadata and browser modules are not TypeScript server compilation outputs.
+fs.copyFileSync(path.join(root, "packages", "remote", "package.json"), path.join(dist, "remote", "package.json"));
+const remoteWeb = path.join(root, "packages", "remote", "web");
+if (fs.existsSync(remoteWeb)) fs.cpSync(remoteWeb, path.join(dist, "remote", "web"), { recursive: true });
+// SHARED keeps .ts browser URLs in both checkout and installed host layouts.
+for (const name of ["protocol.ts", "tool-details.ts", "e2ee.ts"]) {
+  fs.copyFileSync(path.join(root, "packages", "remote", "src", name), path.join(dist, "remote", "src", name));
+}
+// The status mod is loaded by Claude Code itself, as TypeScript; the API types it writes beside the
+// manifest when it loads one are its own and are left out, as is the design preview (a dev tool).
+fs.cpSync(path.join(root, "packages", "mod"), path.join(dist, "mod"), {
+  recursive: true,
+  filter: (source) => !source.includes(`${path.sep}.claude-plugin${path.sep}types`) && !source.includes(`${path.sep}mod${path.sep}preview`),
+});
 fs.cpSync(path.join(root, "packages", "app", "dist"), path.join(dist, "app", "dist"), { recursive: true });
 fs.cpSync(path.join(root, "packages", "app", "assets"), path.join(dist, "app", "assets"), { recursive: true });
 // The tray is compiled to CommonJS, but the package root says "type": "module", and the nearest

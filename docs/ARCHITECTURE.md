@@ -72,19 +72,34 @@ The returned tier was still `default`. These measurements show a repeatable spee
 difference, not a guaranteed tier entitlement or billing policy; backend scheduling
 and admission remain outside the router's control.
 
-### Local Auto mode classifier override (verified 2026-10-01)
+### Optional Auto mode classifier target
 
-Desktop's Claude Code 2.1.284 registers `CLAUDE_CODE_AUTO_MODE_MODEL` but ignores it
-in actual security-monitor requests. The opt-in `autoModeClassifier: {provider,
-model, effort}` config targets only tool-free requests whose system text block
-starts with `You are a security monitor for autonomous AI coding agents.`.
-Conversation text and routing markers cannot select this target. The original
-security rules, context, output format and engine decision logic are preserved.
-Both native classification stages were exercised through the Codex subscription
-on `gpt-6-luna` at `low`: an authorized disposable file write executed; deletion
-explicitly forbidden by the user was denied and the file survived. Ordinary
-model routing is unchanged. Removing the config restores native classification.
-This is a local patch; an upstream reinstall can replace it.
+`autoModeClassifier: { provider, model, effort }` selects the inference target for
+Claude Code's tool-free security-monitor system requests. It is opt-in: without
+this setting, native routing remains unchanged. For example:
+
+```json
+"autoModeClassifier": {"provider": "codex", "model": "gpt-6-luna", "effort": "low"}
+```
+
+The named provider must exist and support outbound inference. Detection uses the
+security-monitor system prompt, never user messages or routing markers. The
+original security prompt, context, output format and native decision logic remain
+intact. Configure this field in the JSON config; the settings GUI has no control
+for it yet. Removing the field restores ordinary routing.
+
+This request is Auto mode's safety check: it decides whether an action the agent
+wants to take runs without asking. A target that judges worse than the model
+Claude Code chose lets more through, and nothing reports it, since an allowed
+action looks like any other. Choose the target for its judgement, not for its
+quota. Matching keys on the classifier prompt's opening sentence; if a Claude Code
+release rewords it, the requests stop matching and go back to the native
+classifier, which is the safe direction to fail in.
+
+Verified with Desktop's Claude Code 2.1.284: both classification stages used the
+configured target; an authorized temporary-file write proceeded and an explicitly
+forbidden deletion was denied. The registered `CLAUDE_CODE_AUTO_MODE_MODEL`
+environment variable did not change the actual native classifier requests.
 
 Verified in `app.asar` (`.vite/build/index.chunk-C0sgyfNn.js`, `-2CuMdv3h.js`):
 
@@ -152,6 +167,14 @@ chat is out of reach for every approach, ours included.
   router logs `PICKER injected … surfaces: …` on each bootstrap.
 - Injecting `additional_model_options` into the Claude Code bootstrap response
   does **not** reach the app picker (measured; the app never reads that field).
+- **The effort menu is per entry.** The Code tab reads each model's own
+  `thinking.effort_options` (ids from `low/medium/high/xhigh/max`; an option may
+  carry `recommended`, which the app falls back to when the selected level is not
+  listed) — read from the app's cached web bundle, 2026-10-02. A cloned Claude
+  entry therefore offered Claude's ladder for every routed model; the injected
+  entry now keeps only the template options whose id the model's ladder holds,
+  recommends high (or the nearest), and drops `thinking` when none remain. The
+  real bootstrap's option fields beyond `id`/`recommended` were not captured.
 - **Windows uses the same mechanism** (measured end to end in a Windows 11 VM,
   2026-09-14: picker listed the GPT models, a call routed, the model answered).
   Two things differ and nothing else does:
@@ -166,7 +189,188 @@ chat is out of reach for every approach, ours included.
   The app's own log line confirms the proxy took effect:
   `[egress-proxy] pinned to fixed proxy at 127.0.0.1:<port>; OS proxy settings ignored`.
 
+### 3a. The status mod (packages/mod)
+
+Claude Code mods (function hooks in a plugin, announced 2026-10-01; on by default
+from CLI 2.1.287, and already loading in the desktop app's 2.1.286 on 2026-10-05)
+draw inside the session itself, on the terminal and on the desktop alike.
+`packages/mod` is one: the `AbovePrompt` band shows where this session's last
+request went, and a `Pane` holds the request log.
+
+- **How a session's requests are found.** Claude Code sends its session id as
+  `X-Claude-Code-Session-Id` on every `/v1/messages` (captured from CLI 2.1.286
+  with a local listener, 2026-10-05: the header equalled `--session-id`). The
+  router keeps it on the request record and `/api/requests?session=` filters by
+  it. A record without the field means a router older than this; the mod says
+  so rather than show another session's route.
+- **The display only reads** the admin API (port from `config.json` as
+  `adminPort` works it out).
+- **It also sets worker spawns right** (`hooks/worker.ts`, `agent.spawn`), for
+  the agents named in `generated-agents.json` only. A `model` argument on the
+  Agent call is replaced by the agent file's own id (a Claude alias there ran
+  the worker on Claude with its output cut to 64 tokens), with a toast. A
+  `[[ripple: name@level]]` marker anywhere in the prompt that names this worker
+  becomes the id's `@level` and leaves the prompt; one naming another alias is
+  moved to the first line, the only place `routing.ts` reads it. Measured on
+  CLI 2.1.286 (2026-10-05): the hook's `model` is what the subagent runs on —
+  `model: "sonnet"` plus the marker on the second line reached the router as
+  `deepseek-v4.1-flash@low`, effort low. Without the mod, the first-line rule
+  and the no-`model` rule stand as before.
+- **Where it can draw.** The desktop app's header icons (terminal, diff,
+  browser) are the app's own; the mod API (CLI 2.1.286 types) has no place for
+  a plugin's button there. Its sites are the band, the status line, panes,
+  transcript rows and slash commands.
+- **Pictures on the desktop are images, never frames.** The desktop app draws
+  each answer as a new DOM tree; an `Svg` becomes a new `<img>` of a data URL,
+  or with `isInteractive` a sandboxed `<iframe srcdoc>` that paints blank until
+  loaded. Only the frame blinks on a redraw: a plain `Svg` image does not, and
+  CSS `@keyframes` inside the SVG run in it (seen by the owner in the desktop
+  app on 2026-10-11 at commit 8d43b97, 리플이 moving in the band and the quick
+  settings with no flicker; Effortless animates its band the same way). A
+  redraw still starts the motion over, so the mod's loops all open on a rest
+  pose (`packages/mod/hooks/ui/ripple.ts`).
+- **A pane's open state is the engine's.** A module reload drops its pane
+  without a `ui.close` the module hears, while `$.state` survives the reload: a
+  flag kept there stuck the Log button on "Close log" (2026-10-05). The mod asks
+  `$.ui.panes()` instead.
+- **Enabling it** is `env.CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`,
+  the one place a desktop-started session reads plugin folders from. It is a
+  path list other plugins may share, so only the entry whose manifest is named
+  `clauderipple-status` is added or removed (`clauderipple mod on|off`, the
+  Clients screen switch).
+- **Developing it, sessions load a copy at the last commit.** With
+  `CLAUDE_CODE_PLUGIN_DIR_WATCH=1` a session reloads a plugin folder whenever
+  it changes, and each reload leaves "ripple reloaded (N hooks: …)" in every
+  open transcript: pointed at the checkout, one session editing the mod
+  flooded all the others (2026-10-13). On this machine the entry is
+  `~/.clauderipple/mod`, which `scripts/sync-mod.mts` keeps at main's
+  `packages/mod` from the post-commit, post-merge and post-rewrite hooks
+  (`--install` writes them), writing only files that differ. Uncommitted work
+  never reaches everyday sessions; `clauderipple mod on` would point the entry
+  back at the checkout.
+
+### 3b. Shared mod settings and judge-only models (2026-10-10)
+
+The router is the single source of the mod's settings, persisted in
+`<homeDir()>/mod-settings.json`. `GET /api/mod-settings` returns
+`{settings:<full normalized Settings>, revision, stored:boolean}`. Before the first
+write it returns normalized defaults, revision 0 and `stored:false`, without creating
+storage. `PUT` accepts `{settings, revision?}`, normalizes with the mod's own pure
+`hooks/settings.ts:normalizeSettings` (type-only imports, no `claude-code` runtime),
+increments the revision under the account stores' `withFileLock` and `writeJsonAtomic`
+helpers (0600), and returns `{settings, revision, stored:true}`. A stale supplied
+revision returns 409 with the same full current snapshot, including `stored`.
+Existing stored settings are normalized on reads as well; unknown fields are dropped.
+Before normalization, the router refuses nonobjects, settings over 64 KiB of UTF-8
+JSON (413), and credential field names at any depth, including inside arrays (400).
+The final word of a field name decides (`apiKey`, `access_token`, `clientSecret`,
+`password`, etc.); `keepWarmMinTokens` is a count, not a credential, and is accepted.
+Corrupt storage is an error, never an empty store to overwrite.
+
+The mod reads this endpoint at `session.start` and every 3-second router poll, even
+when its band is hidden. A changed revision replaces the settings atom and redraws
+readers. Only when `stored:false` does it read legacy plugin-store `settings` and
+`setupDone` and migrate them with a revision-checked PUT; a racing first writer wins
+instead of being overwritten. Afterwards settings are never read from or saved to the
+plugin store; unrelated keys such as picks, band visibility and handoff choices remain.
+Panel/setup saves PUT the last seen revision. On 409 the mod takes the server copy,
+reapplies only the user's changed paths (including sibling rule/provider fields), and
+retries once. A panel keeps its opening baseline so a poll while it is open cannot
+turn an unrelated remote edit into a local overwrite. Offline changes remain active
+locally with the existing router-not-answering notice and retry on the next poll,
+rebased over that poll's server copy. Revision, pending edits and migration state live
+in session atoms and survive module hot reloads; settings HTTP work is serialized.
+Language resolution and the separate Jev key file are unchanged. Verified with
+`test/admin.test.ts`, `test/mod/settings.test.ts` and the mod's 2.1.293 engine tests.
+
+`GET /api/mod-options` returns `agents` (owned manifest entries with existing agent
+files), all configured `models` (`model`, `provider`, `name`, `judgeOnly`), `providers`
+(`name`, `type`, `usable`), `zen:{configured,model}`, and `scores`. ChatGPT usability
+shares `/api/status`'s quota refresh and account states, including purchased credits;
+AA scores reuse `model-scores.ts` and retain its attribution. No provider key is exposed.
+Since 2026-10-11 (the worker ladder, docs/specs/2026-10-11-worker-ladder.md) each agent also
+carries `efforts` (its model's ladder from `effortLevels`, mod efforts only) and `billing`
+(`free | payg | subscription`, `hooks/ladder.ts:billingOf`: ChatGPT, Claude login, Antigravity
+and the OpenCode Go preset are subscriptions, Ollama/LM Studio, a hand-entered local URL and
+`:free`/`-free` models are free, every other preset or API is pay-per-token); providers carry
+`billing`; `claudeEfforts` is Anthropic's ladder; `presets` are the four ladder presets computed
+by the mod's own `hooks/ladder.ts` from the usable workers plus Claude's models, so the dashboard
+and the session's quick settings fill rungs alike.
+
+The worker ladder replaced Pin as the default rule mode (`{mode:'ladder', rungs:{light, standard,
+hard, plan}}`, each rung `{target, effort, backup?}`). The judge adds `kind: plan|do`; level picks
+Light/Standard/Hard, a plan at standard or deep goes to Plan, and `sure < 0.5` moves Light→Standard
+→Hard (Plan does not move). An unavailable rung tries its backup, then one rung up (its model, then
+its backup), then the session model (`general-purpose` with no model; refused only when Anthropic is
+switched off), never down. Stored pins normalize to ladders on every read (missing levels climb,
+efforts start at the default ladder's for the same model or low/medium/high, calibrated as the pin
+was; Plan is Hard's model one effort up); Auto stays Auto, shown as experimental. `fallback` and
+`preference` are kept; only Auto still reads `preference`. Every pick writes one
+`ClaudeRipple worker pick:` debug line. Tests: `test/mod/ladder.test.ts`, `test/admin.test.ts`.
+
+`model-policy.ts:isJudgeOnlyModel` is the single judge-only rule: ids beginning with
+`jev` are not chat models (the OpenCode Zen note in `presets.ts`: `/systemone` only).
+Desktop/CLI picker injection (including aliases/routes targeting Jev), derived worker
+aliases, generated agents, AA auto-worker score candidates, OpenAI model lists and
+Codex catalogs exclude them; the next enabled agent sync removes previously
+owned Jev files, never hand-written ones. Provider configuration and mod options keep
+them available as judge candidates. Tests: `test/admin.test.ts`, `test/model-policy.test.ts`.
+
 ## 4. Provider adapters
+
+### Artificial Analysis model scores (2026-10-10)
+
+`scripts/aa-dataset.mjs` builds `aa-models.json` on the orphan GitHub `data` branch;
+`.github/workflows/aa-data.yml` checks daily at 03:37 UTC, replacing its single commit
+only for substantive changes or after a week. Source: [AA API v2](https://artificialanalysis.ai/api/v2/data/llms/models)
+(`x-api-key`, free limit 1,000 requests/day; `AA_API_KEY` stays in the environment).
+The API supplies slug/name/creator/release date, `evaluations.artificial_analysis_intelligence_index`
+and input/output USD-per-million prices, **not** cost per task. The model page's Next.js
+flight record supplies `intelligenceIndex`, `intelligenceIndexIsEstimated` and
+`intelligenceIndexCostPerTask.cost.total` (USD, already including input/cache/output);
+`intelligenceIndexCost.total` is a different, whole-benchmark total and is never used.
+Measured [GPT-6.1 Sol High](https://artificialanalysis.ai/models/gpt-6-1-sol-high):
+index **50.2378** (≈50.24), **$0.319144 per task** (≈$0.3191), not estimated.
+
+Track families with at least one measured release in the last **365 days**, including
+all their older/unmeasured variants. Group by creator and model name with reasoning
+parentheses removed; retain unrelated Preview/Beta/date labels. Strip only recognized
+reasoning endings from slugs. Effort uses the page suffix/name parentheses, then slug:
+`max/xhigh/high/medium/low/minimal/non-reasoning`; Non-reasoning takes precedence over
+an accompanying High/Low label. Generic Reasoning or the unsuffixed default maps to
+max in a multi-variant family; a single-variant model has null effort. Successful
+`checkedAt` values under **7 days** are reused; failed pages retain prior values/time
+(or null cost/time), and embedded defaults are harvested opportunistically by exact
+slug. Page requests are sequential, ≥1.5 seconds apart with one backed-off 429/5xx
+retry. Fewer than half of attempted pages parsing their requested slug aborts publication.
+The extraction marker `canonicalIntelligenceIndexTokenCount` is a private page-format
+anchor, not an output metric: no token counts are stored. `--limit N` caps page fetches
+for a local smoke run; use `--output <path>` and never publish capped output.
+
+Auto routing and field rules were removed 2026-10-12 (along with `GET /api/model-scores`);
+routing is the four workers (docs/specs/2026-10-12-worker-tiers.md). `model-scores.ts`
+remains as the admin's internal catalog for the mod's options, with normalized
+AA bases (decimal dots → hyphens, provider namespace/Claude snapshot date removed),
+variant intelligence/cost, attribution and generation time. The picker's five effort
+names are preserved; AA minimal/non-reasoning and single variants return null rather
+than being mislabeled low. Unknown models remain present with `matched:false`.
+Scores are metadata, never routing policy or the user's subscription bill. The public
+raw JSON is fetched with a 5-second timeout, kept 24 hours in memory and
+`<homeDir()>/aa-models.json` (mtime records retrieval), shared by concurrent lookups;
+on failure the last cache is kept and retried after one hour. Displays/republication
+must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
+
+- **The Claude model list is Anthropic's own (2026-10-08).** The native `anthropic`
+  provider's models came from a constant in admin.ts, so each release after it was cut
+  was missing from the provider form, the mapping table and the declared list until a
+  ClaudeRipple release caught up — Opus 5.5 (Sep 21), Sonnet 5.5 (Sep 28) and Haiku 5.5
+  (Oct 7) all were, while Claude Code itself had them. `GET /v1/models` answers the Claude
+  Code login (the observed headers) as well as an API key, newest first, with each model's
+  effort ladder, context window and lifecycle (measured: 14 active models). The router
+  caches it for an hour (`ClaudeModelCatalog`); the constant is only the fallback when no
+  sign-in answers. A release is also **declared** on its own, every six hours: added to a
+  native provider that already declares an older model of the same family, and remembered
+  in `claude-models-offered.json` so a model unticked afterwards is not added again.
 
 - **Declared models route themselves (2026-09-19).** A provider's `models` list —
   filled by the probe from the vendor's `/models`, ticked in the GUI — now decides
@@ -200,7 +404,8 @@ chat is out of reach for every approach, ours included.
   also a subagent the operator can name: for every id exactly one non-ingress
   provider declares, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
   `name` = the id with anything outside `[a-z0-9-]` folded to `-`, frontmatter
-  `model:` = the exact id, `@medium` when the provider offers that level). It
+  `model:` = the exact id, `@high` when the provider offers any effort level —
+  `@medium` until 2026-10-02). It
   records what it wrote in `<home>/generated-agents.json` and touches **only**
   those files: a hand-written agent of the same name wins and is left alone, an
   unticked model removes its generated file and nothing else, identical content is
@@ -261,15 +466,33 @@ chat is out of reach for every approach, ours included.
     `/zen/v1/responses`, not the Codex backend): gpt-6-sol, gpt-6-luna,
     gpt-5.6-sol and gpt-5.6-luna all accept `none, low, medium, high, xhigh,
     max` and answer `400 param: reasoning.effort` to both `minimal` and
-    `ultra`. So `ultra` is not a level that API takes on any of them; whether
-    the Codex backend does is still open.
+    `ultra`. So `ultra` is not a level that API takes on any of them. **Settled
+    2026-10-06 on the Codex backend too:** gpt-6.1-sol with `reasoning.effort:
+    "ultra"` answered `400 Invalid value: 'ultra'. Supported values are: 'none',
+    'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'`, while `max` answered
+    200. The catalogue's own description of `ultra` is "Maximum reasoning with
+    automatic task delegation": it is `max` on the wire plus the Codex CLI
+    spawning its own sub-agents, which in Claude Code are Claude Code's
+    subagents. Keep the clamp. (`reasoning.mode` takes `standard`/`pro`, and
+    gpt-6.1-sol refuses `pro`: "not supported with this model".)
+  - **Credits (2026-10-06).** Every Codex response carries
+    `x-codex-credits-has-credits` / `-unlimited` (`True`/`False`) and
+    `-balance`; `/wham/usage` has `credits: {has_credits, unlimited,
+    overage_limit_reached, balance}`. OpenAI's help centre: included usage is
+    spent first, then purchased credits. So a window at 100% with credits left
+    is not an exhausted account — `exhaustedForMs` no longer rests it, and a
+    real 429 still does.
   - **Model catalogue (2026-09-23).** `GET {base}/codex/models?client_version=<v>`
     with the same credentials answers `{ models: [{ slug, display_name,
     visibility: "list"|"hide", context_window, supported_reasoning_levels:
     [{effort}] }] }` — what the Codex CLI's picker shows. **The server filters by
     `client_version`:** `0.146.0` omitted gpt-6-astra/sol/luna, `0.155.0`
-    listed them. The adapter (`catalog.ts`) asks with the higher of a floor and
-    `~/.codex/models_cache.json`'s `client_version`, drops `hide` entries, keeps
+    listed them; `0.158.0` omitted gpt-6.1-sol and `0.159.0` listed it
+    (2026-10-10, also listed at `0.162.1`, `1.0.0`, `99.0.0`). A floor alone
+    trails every release — a Windows user with no Codex CLI never saw 6.1 Sol
+    (#50) — so the adapter (`catalog.ts`) asks with the highest of the floor,
+    `~/.codex/models_cache.json`'s `client_version` and the newest `@openai/codex`
+    on the npm registry (kept a day), drops `hide` entries, keeps
     the list an hour, and falls back to a measured list in the same file. The
     GUI's ChatGPT form fetches it on open; new models arrive unticked. Model ids
     unknown to the backend answer `400 "… model is not supported when using
@@ -392,6 +615,20 @@ chat is out of reach for every approach, ours included.
     from the start; the ChatGPT and openai-compatible translators do the same, and a `tool_choice`
     that named a dropped tool is dropped with it. The adapter logs each drop by name, because the
     failure it replaces is silent.
+  - **A dropped server tool's instructions are withdrawn too (issue #47).** The advisor does reach
+    adapters: Claude Code 2.1.286 declares `{ type: "advisor_20260301", name: "advisor", model }`
+    on every subagent whatever its `tools:` list says, and explains it in an `isMeta` user message
+    (`# Advisor Tool`, "call advisor BEFORE substantive work"). Measured 2026-10-04: `dropped server
+    tools for gpt-6-astra: advisor` on every worker request, and 26 of 28 routed worker transcripts
+    reporting the tool missing. Dropping only the declaration leaves an instruction the model cannot
+    follow. Each translated path that drops server tools therefore appends one line after the
+    caller's system text naming them and telling the model to disregard instructions to call them
+    (`droppedServerToolNote`), the same move the CLI makes when it removes the advisor itself ("The
+    advisor tool is no longer available; disregard the earlier advisor instructions."). The CLI's
+    wording is not matched or stripped, since it changes between releases. Names are sorted, so one
+    set yields one byte sequence and the cached prefix holds. An anthropic-compatible provider with
+    `serverTools: true` keeps every server tool and gets no line; whether DeepSeek runs `advisor` is
+    unmeasured.
   - **Where web search actually runs (measured 2026-09-17).** Claude Code does not put `web_search`
     in the main request. `WebSearch` opens a *separate side request* — system prompt "You are an
     assistant for performing a web search tool use", one message "Perform a web search for the
@@ -443,7 +680,16 @@ chat is out of reach for every approach, ours included.
         runs OpenAI's hosted `web_search` and cites real pages, but its wire is OpenAI-shaped while
         its hits arrive as Responses events (`web_search_call`, `url_citation`), a backend the router
         does not have. DeepSeek's own endpoint and the ChatGPT provider run Anthropic's server tool;
-        OpenCode Go's chat and Anthropic endpoints, and every `openai-compatible` provider, do not.
+        OpenCode Go's chat endpoint, and every `openai-compatible` provider, do not.
+      - **OpenCode Go's Anthropic endpoint does, for DeepSeek only** (corrected 2026-10-07). The
+        line above once said it did not. Re-measured with the key in `x-api-key` (a bearer there
+        answers "Missing API key"), Claude Code's own side request to `/zen/go/v1/messages` came back
+        with ten real hits and `web_search_requests: 1` for deepseek-v4.1-flash, deepseek-v4-flash
+        and deepseek-v4-pro; Kimi K3, MiniMax M3 and Qwen3.8 Flash took the tool and never searched;
+        GLM and MiMo are not served there. The preset lists those three as `anthropicSearch`, and a
+        search routed to one of them (a `smallFast` slot on OpenCode Go's DeepSeek) is relayed there
+        by `anthropicServerToolBackend`, though the model's turns stay on Chat Completions. The
+        Clients screen reads `webSearchModels` from `/api/status` to stop calling them unsearchable.
     - **A model that cannot search does not merely decline — it invents.** Measured 2026-09-21
       against OpenCode Go's chat endpoint: `plugins: [{id: "web"}]` is accepted and ignored (HTTP
       200, no `annotations`, cache reporting no lookup), and the model answers a search-shaped
@@ -478,9 +724,12 @@ chat is out of reach for every approach, ours included.
       `response.completed.response.tool_usage.web_search.num_requests`. The adapter requires both
       a real search count and at least one citation; it never turns uncited prose into a successful
       result. `allowed_domains` becomes `filters.allowed_domains`. Codex exposes no corresponding
-      exclusion filter, so `blocked_domains` is refused rather than ignored. This path is opt-in
-      through `webSearch: {provider, model}`; with no setting, Claude Code's existing Haiku search
-      path is unchanged.
+      exclusion filter, so `blocked_domains` is refused rather than ignored. `webSearch:
+      {provider, model}` sends every search here. With no setting, a search Claude Code sends to a
+      model the router places on a `chatgpt` provider (a `smallFast` slot on Luna) is served the
+      same way, by that model; one left on Haiku is unchanged. Before 2026-10-07 the routed case
+      fell to the guard below and was refused, while the Clients screen called ChatGPT searchable:
+      41 searches of a Luna `smallFast` slot failed in a day with no warning anywhere.
     - The reply is assembled as `server_tool_use` + `web_search_tool_result` + `text`, with
       `usage.server_tool_use.web_search_requests` — the field the CLI turns into "Did N searches".
     - A provider that runs the tool itself is asked in Anthropic's own shape instead
@@ -512,8 +761,13 @@ chat is out of reach for every approach, ours included.
   - `WebFetch` needs none of this: the CLI fetches the URL itself (its own transport, cache and
     preflight; there is no `web_fetch` server tool in the binary) and has the session's model read
     the text. It works on any provider.
-  - Cache-safety decisions: thinking blocks are dropped from replayed history;
-    no reasoning `include`; identity line and `instructionsAppend` are constant
+  - Cache-safety decisions: a translated provider's own reasoning that comes back with the
+    request is sent back **byte-identically, in its original position** — that is what the
+    vendor's native clients do, and it is not a `cache_control` breakpoint; the forbidden
+    thing is *altering or re-signing* reasoning, which is what cost 12–20% cache (2026-09-20).
+    A thinking block of ours that names no vendor model, or another model than this request's,
+    is dropped (§5, "Muse workers"); foreign thinking of any other kind is dropped from
+    replayed history; identity line and `instructionsAppend` are constant
     text; `prompt_cache_key` = sha256(metadata.user_id + first user message),
     and sha256(system prompt) for a request that carries no `metadata.user_id`
     and one lone user turn — see the conversation-key note in §4.
@@ -539,6 +793,19 @@ chat is out of reach for every approach, ours included.
   misses once when either changes and not afterwards.
 
 ### 4a. Claude Code request shapes a translator must handle (measured 2026-09-13, CLI 2.1.266)
+
+**Request-log metadata (`requests.jsonl`, 2026-10-14).** These fields are optional;
+old records and `RequestLog.summary()` remain compatible. No prompt, auth or reasoning
+text is added. Source: `requestlog.ts`, `proxy.ts`, provider adapter outcomes.
+
+- `usage.cacheWrite`: native/Anthropic numeric cache creation tokens, including explicit 0; absent/non-number is omitted, as is a translated adapter's synthetic 0.
+- `upstreamRequestId`: the final forwarded native Anthropic response's `request-id` header (passthrough or account pool).
+- `messageId`: the Anthropic message id delivered by a translated adapter or forwarded compatible response; not a generated id from a non-streaming error.
+- `upstreamCalled`: `false` only for a known pre-model-API exit; omitted when a search backend was attempted or the call state is unknown.
+- `refusal`: `thread-continue`, `drain`, `unroutable`, `no-account`, `unknown-provider` or `web-search-unsupported`, from the actual exit branch.
+- `purpose`: `auto-mode-classifier` from the security-monitor request shape regardless of routing settings, or `web-search` for router-served searches.
+- `requestedTier`: the service tier actually sent upstream, including ChatGPT's `speed: "fast"` → `priority`; omitted when no tier was sent.
+- `servedTier`: the response-reported tier (Responses/Chat `service_tier` or Anthropic `usage.service_tier`); never inferred from the request.
 
 - **Server-side threads ("tether").** The first request of a session carries
   `thread: {type:"create"}` and the full history; later turns carry
@@ -829,9 +1096,11 @@ what we do not have yet — so that adding a provider does not start with readin
   config still written as three providers is folded on the way in and its `direct` and
   `routes` references follow; nothing is rewritten on disk, so it stays readable by an
   older router until the GUI saves it.
-- Translation deliberately strips `thinking`, `context_management`, `thread`,
+- Translation deliberately strips `context_management`, `thread`,
   `diagnostics`, and `container`; `thread:continue` is refused exactly as in §4a so
-  the CLI resends a full stateless history. The per-turn
+  the CLI resends a full stateless history. Thinking is stripped by default too —
+  except the reasoning this adapter itself handed out, which returns as the vendor's
+  own item (see the reasoning-replay note below). The per-turn
   `x-anthropic-billing-header` system block is also stripped because its changing
   value breaks every vendor's stable-prefix cache opportunity. Orphan tool results
   are sent as user text, not a tool result with no antecedent call.
@@ -841,9 +1110,62 @@ what we do not have yet — so that adding a provider does not start with readin
   `effortLevels` overrides provider defaults, including `[]` for “no effort”. When
   an OpenRouter `/models` entry has `supported_parameters`,
   `reasoning_effort` maps to `[low, medium, high]`; its absence maps to `[]`.
-  Vendors that do not report that field keep their configured fallback. Chat wire
+  Vendors that do not report that field keep their configured fallback. For the
+  OpenCode presets (`opencode-go`, `opencode-zen`) a model's ladder comes from
+  models.dev — the catalogue OpenCode's own client reads, whose `reasoning_options`
+  states it — and its `provider.npm` puts that wire first; one request then settles
+  the wire and catches a plan refusal. Asking every level instead took ~10 sequential
+  requests per model (glm-5.3-flash 1m54s, upstream latency 0.5–25s per one-token
+  request, 2026-10-02) and was less right: a 200 means "not refused", and
+  glm-5.3-flash accepted seven levels where the catalogue lists `low`/`high`/`max`.
+  A model the catalogue lacks, or a catalogue that cannot be fetched, is measured as
+  before (`catalog.ts`, `capabilities.ts`). Chat wire
   forwards Anthropic `stop_sequences` as `stop`; Responses wire deliberately omits
   them because its common stateless schema has no corresponding universal field.
+- **Reasoning replay (both wires, 2026-10-14).** A reasoning model on either wire
+  expects its own previous reasoning back on the next turn of a tool loop, and does
+  badly without it. Measured on OpenCode Go's Muse at `xhigh`, same task, 3 runs
+  each: with no replay 9.5k–24.5k reasoning tokens per run (2,197 per step past 80k
+  context) and one run exhausted the context with no answer; with replay 3.2k–4.3k
+  per run (725 per step past 80k) and all three answered, 94% cached.
+  Native clients (OpenCode, the Codex CLI) do this by carrying the vendor's item in
+  their own transcript and putting it back byte-for-byte where it was.
+  Claude Code's transcript is the same medium, so the carrier is the **signature of a
+  thinking block**: `reasoning.ts` encodes `clauderipple.v1:` + base64url JSON
+  naming the wire, provider and model and the thing to restore — the vendor's whole
+  Responses item for the Responses wire, or just the field name
+  (`reasoning_content` / `reasoning`) for Chat. On the Responses wire the item is
+  `{type:"reasoning", id, summary, encrypted_content}` and the request asks for it
+  with `include:["reasoning.encrypted_content"]` (with `store:false` and
+  `reasoning.summary:"auto"`, both of which the chatgpt adapter already sent); the
+  block's text is the summary, or empty when the item had none. `include` is sent on
+  every turn to the ChatGPT backend (as Codex sends it) and to a preset marked
+  `sealedReasoning` (OpenCode Go, as OpenCode's own client sends it): a `store:false`
+  backend that is not asked hands back nothing, so asking only once a conversation
+  already carried reasoning would never start one. Any other Responses vendor is asked
+  only once its own reasoning is already being carried, so an unmeasured vendor keeps
+  its old request. Measured 2026-10-14 against OpenCode Go: the sealed item came back
+  with `include` and without it (1426 bytes either way), replaying it in place
+  answered 200, and the vendor tolerated both a tampered blob and a dropped item. On Chat the
+  block's own text *is* the reasoning and it is reassembled into the field it arrived
+  under on that assistant message — DeepSeek's docs make that mandatory whenever
+  `tools` is present (`https://api-docs.deepseek.com/guides/thinking_mode/`), and it
+  is harmless where a vendor ignores it, so this is not gated by an allowlist.
+  Restore happens only when the envelope names this request's provider and model
+  (model scope validation): another model's or account's `encrypted_content` is a
+  400, and the envelope says whose it is. This is not exposed as a setting, and it
+  does not weaken the cache lesson above — the vendor's bytes are re-sent unchanged,
+  never re-signed or edited. `opencodex` (github.com/lidge-jun/opencodex,
+  `devlog/_fin/260711_claude_inbound/003_evidence.md:93-118`) uses the same
+  envelope-in-the-transcript approach and measured that Claude Code replays thinking
+  blocks with their signature and does not validate it client-side; no code was
+  copied from it. A 4xx that names reasoning/encrypted/item is answered by asking
+  **once more without any replayed reasoning**, so an account switch that invalidates
+  `encrypted_content` costs a little cache and not the turn. `router.log` and
+  `requests.jsonl` carry `replayed=<n>` (items put back) and `reasoning=<n>` (items
+  handed to the client). Gemini and the other translators strip these blocks; a
+  conversation switched to a Claude model does too (`thinking.ts`), since Anthropic
+  would reject a foreign signature.
 - We do not assert a provider-wide cache hit rate: the adapter records
   `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens` when
   a vendor returns it, and otherwise logs zero cache read. The byte-stable
@@ -853,6 +1175,245 @@ what we do not have yet — so that adding a provider does not start with readin
   insufficient-credit response means the key is accepted but the account has no
   credit. Preset endpoint and capability claims cite the vendor's official docs in
   `packages/router/src/presets.ts`.
+
+### 4d. `google` providers (implemented 2026-10-01)
+
+Gemini is a translated provider, not an ingress-only one: it holds no server-side thread,
+so a `thread:continue` is refused exactly as in §4c and the CLI resends a stateless
+history. It routes by its declared models, its agent files are generated like any other
+provider's, and a `web_search` side request aimed at it is refused, not sent. The
+adapter lives in `packages/router/src/providers/google/` and separates translation
+(`translate.ts`), the wire (`transport.ts`) and the signature store
+(`thoughtSignatures.ts`) so Stage 2 (Antigravity Code Assist) is a new transport only.
+
+Both modes are implemented: `api-key` (AI Studio) below, and `auth: "antigravity"` (Cloud
+Code Assist) in its own subsection. No live key or Antigravity subscription exists in this
+environment, so everything below is doc- and source-derived and **not measured** unless it
+says otherwise:
+
+- Stream endpoint `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`,
+  the key on header `x-goog-api-key`, base default `https://generativelanguage.googleapis.com`
+  (https://ai.google.dev/api/generate-content#method:-models.streamgeneratecontent).
+- `systemInstruction` takes `{role:"user"|"model", parts:[…]}`; `contents` is the
+  `user`/`model` turn list; a part is `{text}`, `{inlineData:{mimeType,data}}`,
+  `{functionCall:{name,args}}` or `{functionResponse:{name,response}}`. The `role` of a
+  `functionResponse` part must be `user` (https://ai.google.dev/api/caching#Content).
+- Tools map to `tools[].functionDeclarations[].parametersJsonSchema` — a protobuf
+  `Value` carrying a full JSON Schema, mutually exclusive with the legacy `parameters`
+  (https://ai.google.dev/api/caching#FunctionDeclaration). We send `parametersJsonSchema`.
+- A function name is at most 64 characters, must start with a letter or underscore and
+  may contain letters, digits, underscores, dots, dashes and colons (same
+  `FunctionDeclaration.name`); longer ids are mangled and restored as in §4c.
+- `toolConfig.functionCallingConfig.mode` is `AUTO` / `ANY` / `NONE`; `ANY` may also
+  carry `allowedFunctionNames` (https://ai.google.dev/api/caching#FunctionCallingConfig).
+  Anthropic `tool` maps to `ANY` + `allowedFunctionNames`, `none` to `NONE`.
+- Gemini 3 reasons with `generationConfig.thinkingConfig.thinkingLevel`
+  (`minimal|low|medium|high`); Gemini 2.5 with `thinkingConfig.thinkingBudget`
+  (0..24576 flash, 128..32768 pro; 0 disables) (https://ai.google.dev/gemini-api/docs/thinking).
+  `output_config.effort` is clamped to the model family and to the provider's
+  `effortLevels` when set. **(assumption)** Some samples spell the REST field
+  `thinking_level` flatly; we emit the documented nested `generationConfig.thinkingConfig`
+  shape.
+- `usageMetadata` fields are `promptTokenCount`, `cachedContentTokenCount`,
+  `candidatesTokenCount`, `thoughtsTokenCount`
+  (https://ai.google.dev/api/generate-content#UsageMetadata). Input =
+  `promptTokenCount − cachedContentTokenCount`, cache read = `cachedContentTokenCount`,
+  output = `candidatesTokenCount + thoughtsTokenCount`.
+- A `finishReason` of `STOP` closes as `end_turn` (or `tool_use` when function calls
+  were seen); `MAX_TOKENS` as `max_tokens`; anything else as `end_turn` with a log. A
+  stream that ends with no `finishReason` is the §5 stalled-upstream shape: it becomes a
+  retryable `overloaded_error`, never a silent `end_turn`
+  (https://ai.google.dev/api/generate-content#FinishReason).
+- A wrong key answers `400` with `status: "API_KEY_INVALID"` (or a `401`/`403` whose
+  body names the key); that maps to Anthropic `authentication_error` (401). `429
+  RESOURCE_EXHAUSTED` maps to `rate_limit_error`, `5xx` to `overloaded_error`, other
+  `4xx` to `invalid_request_error`. A bare `403` is read as a permission/region problem,
+  not a bad key.
+- `GET {base}/v1beta/models?pageSize=1000` (key on `x-goog-api-key`) lists
+  `{name, displayName, inputTokenLimit, supportedGenerationMethods, thinking}` with a
+  `nextPageToken`; only entries whose `supportedGenerationMethods` include
+  `generateContent` are kept, `id` is `name` minus `models/`, and
+  `contextWindow = inputTokenLimit`
+  (https://ai.google.dev/api/models#method:-models.list).
+- **thoughtSignature (Gemini 3).** A `functionCall` part on a reasoning model may carry a
+  `thoughtSignature`, and a client replaying that call must return the same signature or
+  the API rejects the turn ("Function call is missing a thought_signature in
+  functionCall parts"). The store keeps signatures keyed by our minted `tool_use` id in a
+  bounded LRU (10,000) and re-attaches them on replay; per-part for parallel calls, where
+  Gemini signs only the first call of a step. On a turn with no cached signature at all (a
+  router restart, a history another model wrote) the documented sentinel
+  `skip_thought_signature_validator` goes on that turn's **first** call, Gemini 3 only. The
+  guide calls it a last resort that costs model performance, so it is never added to a turn
+  that has a real signature — the unsigned parallel calls of a healthy turn are normal
+  (https://cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures, sentinel
+  paragraph read 2026-10-01).
+
+### 4d-ii. Google `auth: "antigravity"` (Cloud Code Assist) — implemented 2026-10-01
+
+A Google subscription signed in through `clauderipple google-login`, streaming through the
+Cloud Code Assist (CCA) backend, with several accounts rotating. Same translation as AI
+Studio; only `transport.ts` differs. Accounts live in `<home>/google-accounts.json` (0600,
+cross-process lock, atomic write, one account per email+project, a re-login replaces its own
+entry), the sign-in in `login.ts`, the account pool and refresh in `accounts.ts`, and the wire
+facts and model-id resolution in `antigravity.ts`. **Every wire fact below is taken from the
+reference implementation opencodex (GitHub `lidge-jun/opencodex`, read 2026-10-01 as a
+behavioral spec — no code copied; project rule) and is not measured live** — no Antigravity
+subscription exists in this environment. Files are under `src/`:
+
+- OAuth is Google's standard installed-app flow with PKCE S256. Client id
+  `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com`, secret
+  `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` (public client values, overridable by env;
+  `oauth/google-antigravity.ts:17-20`). Authorize
+  `https://accounts.google.com/o/oauth2/v2/auth`, tokens
+  `https://oauth2.googleapis.com/token`, userinfo
+  `https://www.googleapis.com/oauth2/v2/userinfo`; scopes `cloud-platform`, `userinfo.email`,
+  `userinfo.profile`, `cclog`, `experimentsandconfigs`; `access_type=offline`,
+  `prompt=consent select_account`; loopback callback port 51121 preferred, path `/callback`,
+  any free port otherwise (`google-antigravity.ts:21-35,177-196`). The token body carries the
+  client id **and** secret and `code_verifier` (form-encoded).
+- Project discovery: `POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with
+  `{metadata:{ideType:"ANTIGRAVITY"}}`; without a project,
+  `POST https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser` with
+  `{tier_id:"free-tier", metadata:{ide_type, ide_name:"antigravity", ide_version}}`, polled up
+  to 5 times, 2 s apart, until `done:true` (`google-antigravity.ts:97-137`). The project id is
+  read from `cloudaicompanionProject | projectId | project[.id]`. A sign-in that finds no
+  project fails rather than storing a credential that would fail every call.
+- Request: `POST {base}/v1internal:streamGenerateContent?alt=sse` (non-streaming
+  `:generateContent`), base default `https://daily-cloudcode-pa.googleapis.com`
+  (`adapters/google.ts:1056-1160`; devlog `140.21`). Envelope
+  `{ model, userAgent:"antigravity", requestType:"agent", project, requestId:"agent-<uuid>",
+  request }`, where `request` is the standard Gemini body plus a nested camelCase
+  `sessionId` (`adapters/google.ts:1145-1158`; `google-antigravity-wire.ts:53-77`). Headers:
+  `Authorization: Bearer <token>` and `User-Agent: antigravity/ide/<ver> (os_type=…; arch=…;
+  aidev_client; auth_method=oauth)` — the IDE client family is required, the backend 404s
+  CLI-shaped UAs (`adapters/client-fingerprint.ts:44-65`). Response frames nest the standard
+  Gemini payload under `response` (`adapters/google.ts:1281,1591-1596`).
+- Model ids. CCA's wire ids carry the tier as a suffix (`gemini-3.8-flash-low`) or a
+  `-tiered` rename (`gemini-3.7-flash-tiered`), while the picker shows a collapsed base id.
+  Resolution, from `providers/antigravity-models.ts`: `gemini-3.8-flash` → its suffix per
+  effort (`…-low/medium/high`, no `thinkingLevel` beside it — the suffix IS the effort);
+  `gemini-3.1-pro` → `gemini-3.1-pro-low` / `gemini-pro-agent` with `thinkingLevel`;
+  `gemini-3.7-flash` → `gemini-3.7-flash-tiered` with `thinkingLevel`; a `claude-*` id takes a
+  `thinkingLevel` only (`resolveAntigravityThinkingLevel` clamps `xhigh/max/ultra`→`high`).
+  CCA's own catalogue is `POST {dailyApi}/v1internal:fetchAvailableModels` with `{project}`,
+  body `{models:{<wireId>:{maxTokens,…}}, agentModelSorts:[{groups:[{modelIds:[…]}]}],
+  tieredModelIds:{flash:[…]}}` (`providers/quota/antigravity.ts:166-168`,
+  `providers/antigravity-models.ts:489-560`); when it cannot be read we fall back to the
+  static collapsed list (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.1-pro`,
+  `gemini-3.1-flash-image`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`,
+  `gpt-oss-120b-medium`, context windows from CCA `maxTokens`).
+- Claude models on CCA force `toolConfig.functionCallingConfig.mode = "VALIDATED"`; a client
+  asking for no tools gets the declarations dropped instead (`adapters/google.ts:1109-1120`).
+- **thoughtSignature.** The CCA path sends a real signature back on the exact `functionCall`
+  the model signed and never adds the `skip_thought_signature_validator` sentinel (a fabricated
+  signature is not "real"). opencodex filters a stored signature with
+  `isLikelyRealThoughtSignature` (`google-antigravity-wire.ts:30-42`) to keep a foreign id
+  (`toolu_…`, `call_…`) out of the signature field, which Antigravity 400s
+  (`TYPE_BYTES`/Base64 decode failure). We do not need that filter: our store is keyed by the
+  `tool_use` id we minted and holds only a `thoughtSignature` the vendor itself sent, so a
+  foreign id is never placed in the field.
+- **Accounts and credentials (§4 Credential pools).** A conversation stays on the account that
+  answered while it is healthy (moving it costs the prompt cache); a refusal before any byte
+  reaches the client moves the turn to the next account: 401 (or a 403 that reads as a
+  credential refusal) gets one refresh and a replay, a fresh token refused with a 401 again
+  marks the account for sign-in; 429/402 rest the account to its `retry-after` (or a default);
+  another 403, 5xx or a connect failure rests it briefly; any other 4xx is the request's fault
+  and is not retried. Refresh is per account, single-flight per token generation, five minutes
+  ahead; only a structured `invalid_grant` marks an account for sign-in. Only the access token
+  and the account email/project id are ever in memory; no token reaches a log or an API response.
+- Session id and prompt cache. The real client puts a stable per-conversation id at
+  `request.sessionId` so provider-side replay can associate a signature with the call that made
+  it; instability loses it (`google-antigravity-wire.ts:62-88`). We derive it from the router's
+  own `conversationKey` (sha256 → BigEndian uint64 masked to 63 bits, left-padded with `-`,
+  CLIProxyAPI's `generateStableSessionID` shape). `requestId` is a fresh `agent-<uuid>` per
+  request, so it does not enter the cacheable body prefix.
+- **Terms.** Using Antigravity credentials from a non-Google client is against Google's terms
+  (Antigravity terms §6; the Gemini CLI FAQ) and Google blocked a large number of such accounts
+  in February 2026. The CLI prints this once before a sign-in and the sign-in API returns it in
+  a `warning` field for the GUI; the wording states only the fact. ClaudeRipple is not
+  affiliated with Google.
+- Admin: `POST/GET /api/google-login`, `POST /api/google-login/code`, `POST
+  /api/google-login/cancel`, `POST /api/google-logout`, `GET /api/google-accounts`,
+  `PATCH/DELETE /api/google-accounts/:id`, and `POST /api/providers/probe` with
+  `{type:"google", auth:"antigravity"}`. CLI: `clauderipple google-login` / `google-logout`.
+
+### 4e. `grok` providers (implemented 2026-10-08)
+
+Grok on a Grok subscription, through the chat proxy the Grok CLI itself talks to, signed in
+with the CLI's own session. A translated provider like §4c: the adapter
+(`packages/router/src/providers/grok/`) reuses `OpenAiCompatibleAdapter` on the Chat wire
+and adds only what an API key would not need — a credential that rotates under the router,
+and the headers the proxy routes on. Measured 2026-10-08 against CLI 1.0.46 on a SuperGrok
+plan unless marked otherwise.
+
+- **Endpoint and headers.** `POST https://cli-chat-proxy.grok.com/v1/chat/completions`,
+  `GET …/v1/models`. The CLI's own README ("Using auth.json for API Access") documents calling
+  it directly with `Authorization: Bearer <auth.json key>`, `X-XAI-Token-Auth: xai-grok-cli`
+  and `x-grok-model-override: <model>` (the proxy routes on the header, not the body). It does
+  not mention that the proxy also refuses a request without `x-grok-client-version`:
+  `426 {"error":"Your Grok CLI version (none) is outdated. Please update to version 1.0.13 or
+  later …"}`. The router sends `clientVersion` from the config when set, else the installed
+  CLI's version (`grok --version`, read again when the binary changes), else 1.0.46. The header names were
+  read from the CLI binary's strings; nothing else from it is used. This channel is the CLI's,
+  not a published API, so the probe returns a facts-only `warning` (like Antigravity's) and the
+  form says so.
+- **Session.** `<grok home>/auth.json` (`$GROK_HOME`, else `~/.grok`), written by `grok login`:
+  one entry per issuer keyed `https://auth.x.ai::<id>`, each with `key`, `expires_at`,
+  `refresh_token`. The README's own `jq` example reads a different key
+  (`https://accounts.x.ai/sign-in`), so the entry that expires last is taken and no key name
+  is assumed. A session token lives **six hours** (`expires_at` − `create_time`; the README
+  says 7 days); a running CLI refreshes it about five minutes before expiry under its own lock
+  (`auth lock: attempting acquire (timeout=25000ms)`, `oidc try_refresh_pure`). Whether the
+  refresh token rotates was not measured. So, as with `borrow-codex`, the router never
+  refreshes the grant itself — if it does rotate, racing the CLI could sign the CLI out.
+- **Refresh by asking the CLI.** With no CLI running, the file just goes stale. When the token
+  has under 10 minutes left the router runs `grok models` with
+  `GROK_AUTH_EARLY_INVALIDATION_SECS=600`: the CLI then sees the token as expiring, refreshes
+  it under its lock and rewrites the file (measured: expiry moved six hours, file rewritten).
+  One run serves every turn waiting on it; 30s bound, since the CLI's lock wait is 25s. A token
+  still alive is used even when that run fails, and a run that left it short is not repeated
+  for a minute, so a broken IdP does not add 30s to every turn. Under launchd's environment
+  (`env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=…`) `grok models` exits 0 and leaves no
+  process behind. The router runs under launchd with
+  `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so the binary is looked up in `<home>/bin/grok` first,
+  then PATH, then `~/.local/bin/grok`; `HOME` is set there, which the CLI needs to find its
+  session.
+- **A 401 is asked once more.** The token read a moment ago can be the one the CLI just
+  replaced. On a 401 before any byte is written the adapter re-reads the file; if it still
+  holds the refused token the CLI refresh is forced (`GROK_AUTH_EARLY_INVALIDATION_SECS=86400`,
+  the value measured to make the CLI refresh, at most once a minute — a proxy that refuses a fresh token is refusing the
+  account), and the turn is asked again only when a different token exists. Otherwise the
+  user reads `authentication_error "Grok: … — sign in with grok login, …"`. An unknown token is
+  `401 {"error":"Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli,
+  upstream=PermissionDenied, reason=no auth context)"}` — a bare string under `error`, which
+  `vendorMessage` now reads. `fetchWithRetry` still never retries a 401 on its own.
+- **Models and effort.** `/v1/models` lists grok-4.7, grok-4.7-build-fast, grok-4.6 and
+  grok-4.5, each with `context_window` 256000, `api_backend: "responses"` and
+  `reasoning_efforts` listed high to low: low..xhigh, except grok-4.5 low..high. The probe
+  saves that ladder per model. On Chat, every model accepted low/medium/high/xhigh (grok-4.5's
+  `xhigh` too — a 200 is only "not refused", so the listing wins) and refused the string
+  `"none"` and `max` with `400 {"code":"invalid-argument"}`; omitting the field is accepted and
+  the model's default (`high`) applies. A model the listing did not describe gets low..xhigh.
+- **Chat, not Responses.** Both wires answer. On Chat the reasoning arrives as text the mapper
+  turns into thinking blocks; the Responses mapper has no reasoning handling (§4c), so a Grok
+  turn there showed none. Tools stream as ordinary `tool_calls` deltas and `tool` messages are
+  accepted back; the usage chunk carries `prompt_tokens_details.cached_tokens`.
+- **Cache.** No conversation header: a repeated 25.5k-token prefix was read from cache on the
+  second call without one (1,152 cached on the first, 25,472 of 25,573 on the second), while
+  the same pair with `x-grok-conv-id` on Chat missed both times. One
+  Claude Code session through a dev router (CLI 2.1.291, grok-4.7, four turns with Read, Write
+  and Bash) read 21,888 / 21,995, 21,888 / 22,210 and 22,144 / 22,257 from cache after its
+  cold first turn; a second session's second turn 21,760 / 22,023. A session's first turn is
+  cold. Watch the daily figure in `requests.jsonl` as for the other translated providers.
+- **Probe.** `POST /api/providers/probe` with `{type:"grok", home?, cli?, url?,
+  clientVersion?}` checks the session through the same `GrokAuth` the adapter uses (so a near-
+  expired one is refreshed here too) and asks `/models` with the headers live traffic sends.
+  `auth: "missing"` is no session or an expired one the CLI could not refresh; `"bad-key"` is
+  the proxy refusing it. The measured list above is offered when the listing cannot be read.
+- Routing, agent files, picker entries and the refusal of `web_search` side requests are the
+  same as for any translated provider. A grok model may not carry `wire`, `url` or
+  `authHeader` (validation refuses it): `providerFor` would turn it into an openai-compatible
+  provider without the session headers. Not available through the OpenAI ingress.
 
 ## 5. Failure modes that must not exist in the product (all observed)
 
@@ -869,6 +1430,7 @@ what we do not have yet — so that adding a provider does not start with readin
 | Tool names over 64 characters were forwarded to the Responses API unchanged, so a single connected MCP server — the product's own use case (§2) — failed every request of that turn (found by reading the source, issue #1, 2026-09-17) | Any name a translated provider sends is mangled into the provider's constraint deterministically and restored on the way back (§4). A translator must validate what it forwards against the wire it forwards to, not only what it builds itself. |
 | Unknown-model context window defaulted to 200K, compaction fired at 151K; fixed via `CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000` (applies only to models not in the CLI's built-in table; Claude models unaffected) | Installer sets this env for mapped models; document that it does not affect Claude models. |
 | Server tools (`web_search`) were declared to translated providers as ordinary functions: a tool the model can call and nothing can run. Not observed live, because Claude Code currently routes its web search elsewhere (§4) — the failure was one server-side flag away, and its shape is an empty answer with nothing logged (issue #4, 2026-09-17) | A translator declares only what the provider can actually execute, and says in the log what it removed. A capability that silently disappears is worse than one that visibly fails. |
+| Routed workers were told to call the `advisor` after its declaration was dropped: Claude Code explains the tool in a user message the router left in place, so 26 of 28 worker transcripts reported it missing, every turn (issue #47, 2026-10-04) | Removing a capability includes withdrawing what was said about it. A translator that drops a tool adds one stable line saying so, rather than editing the caller's text. |
 | One context window was written to every routed model and every slot, because `cli.autoCompactWindow` is a single number while `auto_compact_windows` and `context_window_by_model` are per-model maps. Routed models do not share a window: set it high and the smaller model overflows before it compacts, set it low and the larger throws away most of its own (issue #2, 2026-09-17) | A window belongs to a model, not to the router. `CliModel.contextWindow` and `Route.contextWindow` win, then whatever the vendor's `/models` reported as `context_length`, then the global value as the fallback it always was. A value the config can only express once must not be injected into a map that is keyed per model. |
 | proxenos sends only the 7-day quota window, so the app shows a "weekly limit" banner | Quota reporting must mirror the shape Anthropic returns. |
 | After a reboot the router listened 4 minutes after login (26s of it between exec and `listen()`), and for that whole window Claude Desktop was a blank page with `ERR_PROXY_CONNECTION_FAILED` — in picker mode every byte the app sends goes through us, so a router that is merely slow reads as an app that is broken (2026-09-14 09:59 boot → 10:15:59 listening) | The launchd agent is `ProcessType=Interactive`, never `Background` (that key throttles CPU and I/O — launchd.plist(5)). `listen()` comes before certificate minting and any other startup work, so a client waits rather than being refused. Every startup logs its budget (`startup Nms: node …, config …, listen …`). |
@@ -877,6 +1439,7 @@ what we do not have yet — so that adding a provider does not start with readin
 | Windows: the scheduled task inherited the console that started it, so closing the installer window killed the router with `0xC000013A` (Ctrl+C), 2026-09-14 | The task runs a PowerShell launcher that uses `Start-Process -PassThru -Wait`: detached from any console, still tracked so `RestartCount` keeps acting as KeepAlive and the exit code (including the health self-exit 75) propagates. |
 | Windows: `install` registered a logon-triggered task and stopped there, so the router did not exist until the next sign-in — launchd starts at bootstrap (`RunAtLoad`) and the difference was invisible | `install` starts the supervisor itself on both platforms and prints the result. |
 | Windows: trusting the CA failed with "this operation cannot use the UI" — every PowerShell call carried `-NonInteractive`, and the confirmation dialog never appeared, so picker mode stopped with no certificate and no explanation | Certificate trust and removal run WITHOUT `-NonInteractive` (and without `windowsHide`). They are UI operations by design: the OS must be able to show the user what it is being asked to trust. |
+| macOS, new Mac (2026-10-06): picker mode on, router up, and Claude Desktop would not open — every claude.ai load failed `ERR_CERT_AUTHORITY_INVALID`, router logged `tls alert certificate unknown`; `dump-trust-settings` had no entry for the CA. "Trusted" was decided by `find-certificate` (the item is in the login keychain), which says nothing about trust, so `picker on` could skip the trust step and `status` could read an untrusted CA as trusted | On macOS the CA counts as trusted only when the user trust domain (`security dump-trust-settings`) lists it. `picker off` deletes the keychain item even when it carries no trust. |
 | Windows: sign-in failed with `missing_required_parameter` because the OAuth URL was opened via `cmd /c start`, and cmd reads `&` as a command separator — everything after the first parameter was cut off and run as commands (2026-09-14) | Browsers are opened with `Start-Process <url>` as a single quoted argument. Any URL we hand to a shell must survive its metacharacters. |
 | The provider form's "also show in the Claude app picker" box only records `cli.extraModels`; picker mode itself stayed off, nothing was injected, and the user believed the picker was on (Windows x64, 2026-09-14: `config.json` had no `picker` key, no CA, no Config Library) | When that box is ticked while picker mode is off, the form says so under the box and offers to turn picker mode on right after saving. Any control that *looks* like it enables picker mode must either enable it or say what is still missing. |
 | A DeepSeek mapping answered `401` on every real request while the provider form's own "Test connection" stayed green — the test sends the provider's headers alone, live traffic also carried the caller's `authorization` (2026-09-15, Windows) | A routed request carries provider authentication only (§4). The connection test and live traffic must present the same auth set, or the test certifies a path nobody uses. |
@@ -893,6 +1456,7 @@ what we do not have yet — so that adding a provider does not start with readin
 | The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
 | ChatGPT prompt-cache hit fell from 93% (2026-09-13) to 9% (2026-09-20) with nothing in our request changing — the backend had started keying the cache on the conversation's identity (`session-id`/`thread-id`/`x-client-request-id`/`client_metadata`), which we never sent; `prompt_cache_key` alone no longer earned a write | The adapter states the conversation's identity the way the Codex CLI does (§4) and echoes `x-codex-turn-state`. The acceptance metric (≥90% on translated providers) is watched per day in `requests.jsonl`; a fall with an unchanged request means the wire changed under us, and the reference to diff against is the real CLI captured through a local proxy, not our own memory of the protocol. |
 | Remote Control registration failed locally with 405 before Anthropic saw it: Claude Code 2.1.275 uses HTTPS absolute-form (`POST https://api.anthropic.com/v1/environments/bridge HTTP/1.1`) rather than CONNECT for registration, polling and heartbeats, while the forward-proxy socket accepted CONNECT only (issue #10, Windows 11) | Accept valid HTTPS absolute-form, strip proxy-only headers, replace Host, rewrite only the target to origin-form, and relay one request over direct TLS outside model routing. Force `Connection: close`: reusing that TLS socket could send a later proxy-form request to the first origin. Parser tests plus a live local TLS origin verify body and credential preservation. |
+| The status mod's band said "router not answering" on every tick while the admin API answered curl (2026-10-06, CLI 2.1.288): the host's `$.http.fetch("http://127.0.0.1:8792/…")` went through `HTTPS_PROXY` as plain-HTTP absolute-form (`GET http://127.0.0.1:8792/… HTTP/1.1`), loopback included, and the proxy socket answered 405 to anything but CONNECT or `https:` absolute-form. Measured with a probe mod under `claude -p --plugin-dir`: 405 with an empty body | `http:` absolute-form is relayed like `https:` (same header rewrite, `Connection: close`) over plain TCP. A live loopback origin test covers it. |
 | Re-running `clauderipple install` as a normal Windows user rewrote the launcher, then `Register-ScheduledTask -Force` could answer `0x80070005 Access is denied` even though the existing per-user task was already correct (issue #9) | Reuse an existing task only when its entire intended definition matches: one PowerShell action and exact arguments, current user, limited interactive logon, one matching logon trigger, restart count/interval, no execution limit, IgnoreNew, and battery policy. A missing, stale or foreign same-named task still takes the normal registration/error path. |
 | OpenCode Go's relay answered `403 {"message":"Error from provider (Console Go): Upstream request failed: …"}` during a few seconds of its own trouble. The 403 was classified as an auth failure, which both cooled the credential for 60s **and** removed it from the retry candidate list, so the router could not retry inside the turn and answered the user with what read as an authentication error. Five times in a day, each cleared by asking again (2026-09-21) | A 403 whose body reports an upstream failure is charged a **zero** cooldown. It is not a statement about the credential, and any wait at all moves the conversation off a key that did nothing and takes its prompt cache with it (§4). With no cooldown the credential stays retryable, so the turn is answered on the next attempt instead of becoming a user-visible failure. The body is the only way to tell this apart from a real 403 (policy, region, blocked model), so it is read for 403 and only 403. |
 | The same relay 403 kept reaching the user after that fix, because it was the wrong layer: DeepSeek runs on `openai-compatible`, whose adapter was **never** retried at all — the in-turn retry lives only in the anthropic-compatible wire path (`nextCredential`), and `credentialsOf` gives a translated provider exactly one credential and no fallback. So a relay hiccup had nowhere to go but the user (2026-09-21, root cause of the day's repeated "authentication failed") | Every translated adapter retries the `fetch` **before** any status or byte is written, so the turn is still replaceable (§4 "the first byte commits the turn"). `fetchWithRetry` retries only `transient` verdicts — connect failures, 5xx, and a 403 reporting a broken upstream — to the ceiling of 10 attempts the CLI itself uses, with a 250ms→2s backoff. A 401/429 is **not** retried: the adapter holds one credential, so asking the key that just refused the identical request again only delays the error. `classify` is reused for the judgement, with `kind === "transient"` narrowing a pool's answer to an adapter's. |
@@ -900,6 +1464,13 @@ what we do not have yet — so that adding a provider does not start with readin
 | A session switched from gpt-6-astra to claude-opus-5-5 failed every turn with `400 messages.2.content.0.thinking: each thinking block must contain thinking`: the translated adapters hand the CLI reasoning as `thinking` blocks with no signature (and no text when the reasoning item had no summary), the CLI keeps them, and passthrough replayed them to Anthropic (2026-09-28) | Before a request reaches Anthropic (`PASS` and the account-pool provider), assistant `thinking` blocks without a signature are dropped (`thinking.ts`) — Anthropic's own always carry one — and a turn left empty goes with them. Passthrough stays byte-exact when there is nothing to drop. |
 | Re-running the installer — the documented update — replaced the files and left the router running the old code: `install` treats a running router as done, and on Windows and Linux an unchanged supervisor definition is not re-registered, so nothing restarted it until the next login (found 2026-09-28 while building `update`; the tray's own restart covered only the packaged app) | `install` asks a router that is already running for its version and restarts one that differs. Measured in the Windows 11 VM: 0.5.1 running, installer run with 0.6.0 → "restarting it on 0.6.0", status 0.6.0. |
 | The tray's Electron (~270MB) was fetched into the installed package's own `node_modules`, and `npm install -g` of any other version deleted it with the old files (measured 2026-09-28): every update silently took the tray away, and on Windows a running tray held `electron.exe` inside the folder npm had to replace | Electron lives in `<home>/tray-runtime`, outside anything an update replaces. Both install scripts move one found in the old place there before installing (Windows first stops a tray running from it, and starts it again after setup) — checked on macOS and in the VM with a locked `electron.exe`. |
+| Adding a provider in the settings window restored three OpenCode effort ladders realigned by hand five hours earlier, so the app's effort menus for DeepSeek and GLM never narrowed (2026-10-02 23:13, found 10-05). `PUT /api/config` takes the whole config, and the screen built it from the copy it loaded at open and never re-read; the router itself also writes `config.json` (a measurement's results), so any of those was undone by the next unrelated save | Every GUI save fetches the router's config first and applies its own change to that. A provider form, which holds per-model fields (wire, ladder, window) from when it opened and has no control for them, takes a saved model's values from the router's copy. The provider and client screens re-read the config whenever they load. |
+| In picker mode, claude.ai requests failed as `502 … ECONNRESET` in under a second — 259 times in four days (2026-10-03..06), mostly `current_user_access`, `desktop/features` and `event_logging`. The kept-alive upstream socket had been closed by claude.ai as the next request was written on it, and Node does not resend | A GET/HEAD/OPTIONS whose reused socket resets before any response is sent again (twice at most), logged `STALE`. A POST is never resent: a reset does not prove the upstream did not act on it. Not yet shown to be the cause of the Windows "chat history loads forever" report (DC, 2026-10-06). |
+| An API-key provider with no declared effort ladder — DeepSeek, Kimi, GLM, MiniMax, Qwen, Groq, Mistral, a key and a URL — stripped every effort the user picked (`effort high→removed`) and the Claude app showed no effort menu for its models (DC reports, 2026-10-06). Declaring nothing was meant as "do not guess", but DeepSeek's API, for one, validates `output_config.effort` and maps it onto low/high/max | When nothing declares a ladder (no config ladder, no preset ladder, OpenAI-compatible `reasoning` not `effort` — the form writes `none` by default), a measurement sends a level no vendor defines first: accepted means the field is ignored (no effort, `[]`); refused means it is validated, and the levels the refusal names (else every known one) are sent one by one and the accepted ones become the model's ladder. A 429/5xx concludes nothing. The router runs this a minute after start for unsettled models, so existing providers need no re-save. The DeepSeek preset now declares low/high/max from its docs. |
+| Muse workers spent minutes per tool call, repeated the same reasoning every step, and one ended with no answer at all (2026-10-14). A reasoning model on a translated wire was getting its own previous reasoning dropped, so each step reasoned the whole problem again from scratch: measured at `xhigh` on OpenCode Go, 9.5k–24.5k reasoning tokens per run without replay against 3.2k–4.3k with it (3 runs each; 2,197 against 725 per step past 80k context; one no-replay run exhausted the context) | The vendor's reasoning is carried in the client's transcript and put back byte-identically at its original position: the Responses item whole, under `include:["reasoning.encrypted_content"]`, and on Chat its text as `reasoning_content`. `reasoning.ts` states the envelope; a block whose envelope names another provider or model is dropped, and a 4xx naming the reasoning is retried once without it. |
+| ChatGPT accounts that had bought Codex credits were rested by the router the moment a window read 100%, though OpenAI serves them from credits past the window | `exhaustedForMs` ignores a full window while `credits.has_credits` or `unlimited` holds (and `overage_limit_reached` does not); an actual 429 still rests the account until the window resets. |
+| After ~120 host↔relay reconnects no phone could connect for minutes — web and native sat at "connecting" while the host's control socket was open and answering pings, and a host restart did not help (the simulator's own log: every attempt 19:10–19:17 timed out waiting for the relay's `open`, then the next one worked with no change on the phone; 2026-10-15). Measured on the deployed relay with throwaway server ids: a replaced host control socket whose other end never answers the close stays in `getWebSockets("host")`, in acceptance order, for 8+ minutes, and the room sent every phone's `connect` to `sockets("host")[0]` — that dead socket — through any number of reconnects and a restart | The room routes a phone only to the **newest** host socket (each is tagged `at:<accepted ms>`), and only while it pinged within `HOST_SILENT_MS` (the runtime's auto-response timestamp); a silent newest socket is closed `4408` and the phone hears `4404 host offline` at once. The host walks the phone's path itself after every hello and every 5 min (a client socket to its own room must come back `open` within 10 s) and reconnects when it does not; a ping timer that ran late (sleep, blocked event loop) is not taken for a dead socket. Close codes, reasons and ISO timestamps are in `host.log`. In-process tests reproduce the sequence over a network that keeps dead sockets listed (`relay-reconnect.test.ts`). |
+| An expired Claude login on the Mac wrote `[desktop state] …로그인이 만료되었습니다…` every few seconds per Claude app session and read the keychain (a synchronous child process) for every request, while phones learned of it only by a failed send (2026-10-15) | A login problem is one host state: logged when it starts and ends, sent to phones as `HostInfo.desktopProblem` (a banner), and the keychain is reread at most every 30 s while expired or after a 401. Per-session Remote Control errors log once per change. The host never refreshes the login itself. |
 
 ## 6. Blocked paths (measured, do not retry)
 
@@ -920,13 +1491,15 @@ distribution, GPL-3.0 license (chosen 2026-09-13 over MIT: sole author, reversib
 subscribers**, not a replacement for people without one.
 
 
-### Codex context-overflow recovery (verified 2026-10-01)
+### Codex context-overflow recovery
 
 The subscription backend can reject an oversized request with HTTP 200 followed by
 `response.failed` / `context_length_exceeded`. The Messages adapter maps this to
-`invalid_request_error` and prefixes `prompt is too long`, the phrase recognized by
-Desktop CLI 2.1.284. Keep early SSE events pending until actual content arrives so
-an early failure is returned as HTTP 400. Transient overloads and interrupted
-streams remain retryable; never turn a rejection into a successful empty answer.
-Both streaming and non-streaming rejection paths are covered by adapter tests.
-A session still needs successful native compaction before work is restored.
+`invalid_request_error` and prefixes `prompt is too long`, which Desktop CLI
+2.1.284 recognizes. Keep the initial message-start event pending until another
+translated event arrives so an early rejection can retain HTTP 400. Transient
+overloads and interrupted streams remain retryable.
+
+Both streaming and non-streaming early-rejection paths are covered by adapter
+tests. The client still needs to compact its history or otherwise reduce input;
+this mapping does not increase the backend's context limit.

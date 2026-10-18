@@ -13,9 +13,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { homeDir, type Config, type Provider } from "./config.ts";
+import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
 import { declaredBy } from "./routing.ts";
-import { adminPort } from "./admin.ts";
+import { isJudgeOnlyModel } from "./model-policy.ts";
+import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
 import { shortName } from "../../cli/src/hooks/agent-title.ts";
 
 /** The least a caller has to offer as a logger; `console` qualifies, so startup can pass one. */
@@ -42,6 +43,11 @@ const BODY = [
   "다른 에이전트에게 넘기지 않는다. 프롬프트 첫 줄의 `[[ripple: …]]` 표식은 라우팅용이니 무시한다.",
   "Create and edit project files when the delegated task authorizes implementation. Follow the project instructions and the assigned scope.",
   "For read-only investigations, do not modify project files. Keep temporary scratch files under `/tmp` and remove them when finished.",
+  // Claude Code tells a bypass/auto session to read and edit through Bash (since CLI 2.1.234). After it
+  // arrived Bash edits went from 32% to 78% and Read calls from 2,897 to 151 in the operator's
+  // sessions, and details went missing (brain, 2026-08-25); workers here read with `sed -n`/`cat` more
+  // than with Read (2026-10-14). The operator's own rule, given to the workers too:
+  "**소스 파일 읽기와 수정은 전용 도구로 한다.** 처음 만지는 파일은 Read로 통독하고(필요하면 다시 읽는다), 수정은 Edit, 새 파일은 Write로 한다. `cat`·`sed -n`·`head`로 조각만 읽어 넘기지 않고, `sed -i`·heredoc 덮어쓰기·스크립트 재작성으로 소스를 고치지 않는다 — 간격·정렬·주석이 조용히 깎인다. Bash는 검색(grep/rg)·실행·테스트·빌드, 그리고 수십 곳 이상의 기계적 일괄 치환(끝나면 `git diff`로 확인)에만 쓴다.",
 ].join("\n");
 
 /**
@@ -142,7 +148,7 @@ function scanDir(dir: string, log?: AgentLog): Map<string, AgentEntry> {
 export function agentAliases(dir: string, log?: AgentLog): Record<string, string> {
   const out: Record<string, string> = {};
   for (const entry of scanDir(dir, log).values()) {
-    if (!entry.model) continue;
+    if (!entry.model || isJudgeOnlyModel(entry.model)) continue;
     out[entry.name] = entry.model.replace(/@[a-z]+$/i, "");
   }
   return out;
@@ -154,18 +160,23 @@ export function agentNameFor(modelId: string): string {
 }
 
 function capsEffortLevels(provider: Provider): string[] | undefined {
+  // A grok provider has no caps: its adapter sends the common ladder to a model the listing left out.
+  if (provider.type === "grok") return [...GROK_EFFORT_LEVELS];
   return (provider as { caps?: { effortLevels?: string[] } }).caps?.effortLevels;
 }
 
 /**
- * The `@effort` suffix a generated file's `model:` carries: `@medium` when the provider or the model
- * offers medium reasoning, otherwise none. An empty `model.effortLevels` disables the provider
- * fallback (config.ts), so it is honoured rather than ignored.
+ * The `@effort` suffix a generated file's `model:` carries: `@high` when the provider or the model
+ * offers any reasoning effort, otherwise none. A ladder without `high` is fine — the request is
+ * clamped to the nearest level the model takes (compat.ts). It used to be `@medium`, which a ladder
+ * from the catalogue such as `low`/`high`/`max` does not hold, and the operator wants workers at
+ * high unless a marker says otherwise (2026-10-02). An empty `model.effortLevels` disables the
+ * provider fallback (config.ts), so it is honoured rather than ignored.
  */
 function effortSuffix(provider: Provider, modelId: string): string {
   const modelLevels = provider.models?.find((m) => m.id === modelId)?.effortLevels;
   const levels = modelLevels !== undefined ? modelLevels : capsEffortLevels(provider);
-  return levels?.includes("medium") ? "@medium" : "";
+  return levels && levels.length > 0 ? "@high" : "";
 }
 
 /**
@@ -200,6 +211,24 @@ function readManifest(file: string): Manifest {
     /* missing or broken: treat as empty, and it is rewritten below */
   }
   return { agents: [] };
+}
+
+export type GeneratedAgent = { name: string; model: string; provider: string };
+
+/** Owned files that still exist and name a configured worker, not hand-written agents. */
+export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPath = path.join(homeDir(), "generated-agents.json"), log?: AgentLog): GeneratedAgent[] {
+  const owned = new Set(readManifest(manifestPath).agents);
+  const result: GeneratedAgent[] = [];
+  for (const entry of scanDir(dir, log).values()) {
+    if (!owned.has(entry.name) || !entry.model || isJudgeOnlyModel(entry.model)) continue;
+    const model = entry.model.replace(/@[a-z]+$/i, "");
+    const owners = declaredBy(model, cfg);
+    const provider = owners.length === 1 ? owners[0] : undefined;
+    const target = provider ? cfg.providers[provider] : undefined;
+    if (!provider || !target || (target.type === "anthropic" && !target.accountPool)) continue;
+    result.push({ name: entry.name, model, provider });
+  }
+  return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function writeManifest(file: string, manifest: Manifest, log?: AgentLog): void {
@@ -240,6 +269,7 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
   for (const [providerName, provider] of Object.entries(cfg.providers)) {
     if (provider.type === "anthropic" && !provider.accountPool) continue;
     for (const model of provider.models ?? []) {
+      if (isJudgeOnlyModel(model.id)) continue;
       const owners = declaredBy(model.id, cfg);
       if (owners.length !== 1) {
         if (owners.length > 1) log?.warn(`agent files: "${model.id}" is declared by ${owners.join(", ")}; not generating an agent for it`);

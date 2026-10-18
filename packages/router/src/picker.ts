@@ -10,7 +10,10 @@
 // heuristically (anything that is not the claude.ai chat surface); the ids we saw are
 // logged once so the heuristic can be tightened.
 
-import type { CliModel } from "./config.ts";
+import type { CliModel, Config } from "./config.ts";
+import { resolve } from "./routing.ts";
+import { clampEffort } from "./compat.ts";
+import { isJudgeOnlyModel } from "./model-policy.ts";
 
 export const BOOTSTRAP_PATHS = ["/edge-api/bootstrap", "/api/bootstrap"];
 
@@ -34,12 +37,45 @@ function pickTemplate(models: ModelEntry[]): ModelEntry | null {
   return models.find((m) => isClaudeEntry(m) && !m.disabled && m.section !== "deprecated" && m.section !== "legacy") ?? models.find(isClaudeEntry) ?? null;
 }
 
+/**
+ * The effort menu for one routed model: the template's own options, narrowed to the levels the
+ * model takes.
+ *
+ * The app builds the menu per entry from `thinking.effort_options` (`effortOptionsFor: e =>
+ * …effort_options ?? []` in the Code tab bundle, read 2026-10-02), so a cloned Claude entry offered
+ * Claude's whole ladder for a model that takes three of it. The template's option objects are kept
+ * as they are — they carry the app's localised labels, and an id the app does not know (its list is
+ * low/medium/high/xhigh/max) is not invented here. `recommended` moves to high, or the level nearest
+ * it: when the selected level is not on the list, the app switches to the recommended one (`uw`).
+ * A model that takes none of them gets no `thinking` at all, which the app reads as "no effort".
+ */
+function narrowThinking(entry: ModelEntry, levels: string[]): void {
+  const thinking = entry.thinking as { effort_options?: { id?: unknown; recommended?: unknown }[] } | undefined;
+  if (!thinking || !Array.isArray(thinking.effort_options)) return;
+  const kept = thinking.effort_options.filter((option) => typeof option.id === "string" && levels.includes(option.id));
+  if (kept.length === 0) {
+    delete entry.thinking;
+    return;
+  }
+  const preferred = clampEffort("high", kept.map((option) => option.id as string));
+  entry.thinking = { ...thinking, effort_options: kept.map(({ recommended: _recommended, ...option }) => (option.id === preferred ? { ...option, recommended: true } : option)) };
+}
+
+/** Resolve aliases/routes before advertising an entry; a chat-looking alias can target a judge. */
+export function chatPickerModels(cfg: Config): CliModel[] {
+  return cfg.cli.extraModels.filter(entry => !isJudgeOnlyModel(entry.model) && !isJudgeOnlyModel(resolve(entry.model, {}, cfg)?.model ?? cfg.aliases[entry.model.split("@")[0]!] ?? ""));
+}
+
 export type PickerModelEntry = { id: string; name: string };
 export type InjectResult = { injected: number; surfaces: { id: string; models: string[]; entries: PickerModelEntry[] }[] };
 
-/** Mutates `json` in place; returns what was done for logging. */
-export function injectPickerModels(json: Record<string, unknown>, extra: CliModel[], contextWindow?: number): InjectResult {
+/**
+ * Mutates `json` in place; returns what was done for logging. `effortFor` names the levels a model
+ * takes (by its id without an `@effort` suffix); undefined leaves the template's menu as it is.
+ */
+export function injectPickerModels(json: Record<string, unknown>, extra: CliModel[], contextWindow?: number, effortFor?: (model: string) => string[] | undefined): InjectResult {
   const result: InjectResult = { injected: 0, surfaces: [] };
+  extra = extra.filter(e => !isJudgeOnlyModel(e.model));
   const msc = json.model_selector_config;
   if (!Array.isArray(msc) || extra.length === 0) return result;
   for (const surface of msc as Surface[]) {
@@ -64,6 +100,8 @@ export function injectPickerModels(json: Record<string, unknown>, extra: CliMode
       else delete entry.description;
       for (const k of ["disabled", "disabled_reason", "notice", "selection_notice", "badge", "badge_tooltip", "tooltip", "minimum_tier", "is_default"]) delete entry[k];
       entry.section = "main";
+      const levels = effortFor?.(e.model.split("@")[0]!);
+      if (levels) narrowThinking(entry, levels);
       surface.models.push(entry);
       result.injected++;
     }
