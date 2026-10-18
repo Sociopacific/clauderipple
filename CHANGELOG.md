@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Desktop model picker setup is no longer hidden behind a connected routing status.**
+  The Status screen reports Claude Code routing and the Desktop picker separately,
+  links to picker setup when it is off, and shows when Desktop has not fetched its
+  model list yet. The installer and quick start now spell out `clauderipple picker on`,
+  the certificate confirmation and the full app restart needed to see provider names.
+
 ## 0.9.5 — 2026-10-14
 
 ### Fixed

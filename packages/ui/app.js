@@ -259,11 +259,17 @@ async function refreshHealth() {
     else if (loadedUiRevision !== status.uiRevision && $("#modal-backdrop").hidden) location.reload();
   }
   const desktop = $("#health-desktop");
-  desktop.replaceChildren(cell(
-    t("health.connection"),
-    status.settings.pointsAtRouter ? badge("ok", t("health.connected")) : badge("bad", t("health.notConnected")),
-    status.settings.pointsAtRouter ? t("health.connectedHelp") : t("health.notConnectedHelp"),
-  ));
+  const picker = status.picker || { enabled: false, last: null };
+  const pickerReady = picker.enabled && picker.last && picker.last.injected > 0;
+  desktop.replaceChildren(
+    cell(t("health.connection"),
+      status.settings.pointsAtRouter ? badge("ok", t("health.connected")) : badge("bad", t("health.notConnected")),
+      status.settings.pointsAtRouter ? t("health.connectedHelp") : t("health.notConnectedHelp")),
+    cell(t("health.desktopPicker"), [
+      badge(pickerReady ? "ok" : "warn", t(!picker.enabled ? "health.pickerOff" : pickerReady ? "health.pickerReady" : "health.pickerPending")),
+      ...(!picker.enabled ? [el("button", { class: "btn", text: t("health.setupPicker"), onclick: () => showView("clients") })] : []),
+    ], t(!picker.enabled ? "health.pickerOffHelp" : pickerReady ? "health.pickerReadyHelp" : "health.pickerPendingHelp")),
+  );
   $("#health-requests").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", Object.fromEntries(Object.entries(status.stats || {}).map(([key, value]) => [key, typeof value === "number" ? value.toLocaleString() : value]))) })]));
   renderHealthProviders();
   if (clientsLoaded) renderClients();

@@ -311,6 +311,18 @@ clauderipple ui
 
 **프로바이더** → ChatGPT 추가 또는 API 키 붙여 넣기 → **모델 매핑**.
 
+**Claude Desktop 피커에 GPT 등 프로바이더 모델을 실제 이름으로 보려면 한 단계가 더 필요합니다.**
+
+```sh
+clauderipple picker on
+```
+
+또는 **클라이언트 → Claude Desktop → 모델 피커 → 켜기**를 선택하세요. 운영체제의 로컬 인증서 확인 후
+**Claude Desktop을 완전히 종료하고 다시 여세요**(macOS: ⌘Q). 창만 닫으면 적용되지 않습니다.
+상태 화면은 Claude Code 라우팅과 Desktop 모델 피커를 별도로 표시합니다. 라우팅이 연결되어 있어도
+Desktop 피커는 꺼져 있을 수 있습니다. `install`은 라우팅을 설정하며, Desktop 피커를 켜거나
+인증서를 자동으로 신뢰하지는 않습니다.
+
 **메뉴 막대·트레이 앱은 선택 사항입니다.** 라우터 상태를 보여주고 한 번에 대시보드를 엽니다.
 
 ```sh

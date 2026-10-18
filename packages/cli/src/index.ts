@@ -274,7 +274,13 @@ async function install(): Promise<void> {
   const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), ...(maxCtx ? { maxContextTokens: Number(maxCtx) } : {}), models: cfg.cli.models ?? {} });
   console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
-  console.log("\nDone. New Claude Desktop Code sessions go through ClaudeRipple. Existing sessions pick up settings.json env changes on their next request.");
+  console.log("\nClaude Code routing is configured. Existing sessions pick up settings.json env changes on their next request.");
+  if (cfg.picker?.enabled) {
+    console.log("Desktop model picker is enabled. After changing its setup, quit Claude Desktop completely and reopen it; closing the window is not enough.");
+  } else {
+    console.log("Desktop model picker is OFF. To show provider models by name, run `clauderipple picker on` (your OS will ask you to trust the local certificate), then quit Claude Desktop completely and reopen it.");
+    console.log("Or open the dashboard: Clients → Claude Desktop → Model picker.");
+  }
 }
 
 function uninstall(): void {

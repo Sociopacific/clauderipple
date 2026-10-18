@@ -368,6 +368,19 @@ clauderipple ui
 
 **Providers** → add ChatGPT or paste an API key → **Model mapping**.
 
+**For GPT and other provider models to appear by name in Claude Desktop, there is one more step:**
+
+```sh
+clauderipple picker on
+```
+
+Or use **Clients → Claude Desktop → Model picker → on**. Confirm trusting the local
+certificate when your operating system asks, then **quit Claude Desktop completely and
+reopen it** (macOS: ⌘Q). Closing its window is not enough. The Status screen reports
+Claude Code routing and the Desktop model picker separately: routing can be connected
+while the Desktop picker is still off. `install` configures routing; it does not enable
+the Desktop picker or trust the certificate automatically.
+
 **The menu-bar / tray app** is optional. It shows the router's state and opens the
 dashboard in a click:
 
@@ -387,8 +400,7 @@ clauderipple update
 It updates the way you installed — the install script again, or npm — and restarts the router
 on the new version. The tray's Electron is kept across updates.
 
-Optional, for real names in the Desktop picker: **Clients → Claude Desktop → Model
-picker → on**, then quit and reopen Claude Desktop. To trust the local certificate
+To trust the local certificate used by the Desktop picker
 for your user only, macOS asks for your login password and Windows shows a
 confirmation dialog with the fingerprint; Linux adds it to your NSS database without asking.
 ClaudeRipple never sees a password, and no platform needs administrator rights.
