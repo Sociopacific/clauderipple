@@ -255,6 +255,30 @@ const usageLimit = (resetAfter: number): Behaviour => ({
   body: JSON.stringify({ error: { type: "usage_limit_reached", message: "The usage limit has been reached" } }),
 });
 
+test("Codex at capacity is a retryable overload, not spent quota or an account cooldown", async () => {
+  for (const retryAfter of [undefined, "2"]) {
+    rig(1);
+    behaviour.set("tok-0", [{
+      status: 429,
+      headers: {
+        "x-codex-primary-used-percent": "100", "x-codex-primary-window-minutes": "10080",
+        "x-codex-primary-reset-after-seconds": "600000",
+        ...(retryAfter ? { "retry-after": retryAfter } : {}),
+      },
+      body: JSON.stringify({ error: { type: "rate_limit_error", code: "turn_rate_limit_exceeded", message: "Codex is at capacity, please try again later" } }),
+    }, { status: 200 }]);
+    const busy = await call("capacity");
+    assert.equal(busy.status, 529);
+    assert.equal(JSON.parse(busy.body).error.type, "overloaded_error");
+    assert.match(JSON.parse(busy.body).error.message, /Codex is at capacity/);
+    assert.equal(busy.headers["retry-after"], retryAfter, "never use a quota reset as a capacity delay");
+    assert.equal(adapter.accountStatus()[0]!.state, "ready");
+    assert.equal((await call("capacity", "retry")).status, 200);
+    assert.equal(hits.length, 2, "the next turn reaches the backend without a local usage-limit refusal");
+    assert.equal(hits[0]!.conversation, hits[1]!.conversation, "keep the prompt-cache identity");
+  }
+});
+
 test("credits: full included quota stays usable across snapshots without credit headers", async () => {
   rig(1);
   const full = { "x-codex-primary-used-percent": "100", "x-codex-primary-reset-after-seconds": "3600" };

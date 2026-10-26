@@ -1417,6 +1417,17 @@ plan unless marked otherwise.
 
 ## 5. Failure modes that must not exist in the product (all observed)
 
+On 2026-10-26 the Codex backend answered HTTP 429 with `error.code:
+turn_rate_limit_exceeded` and "Codex is at capacity, please try again later", while the
+account's usage lookup still reported remaining quota and available purchased credits.
+This exact structured capacity response is mapped to Anthropic 529 `overloaded_error`
+before account quota/health is charged. The client's bounded overload retries may recover
+the turn, with the same conversation/account identity. Preserve an explicit `Retry-After`;
+do not use `x-codex-*-reset-*` plan-window headers to delay capacity retries. Unknown 429s
+and actual `usage_limit_reached` responses keep the ordinary quota handling. Codex's
+OpenAI passthrough keeps the original status/body and does not switch accounts or caller
+credentials for this capacity refusal.
+
 | Observed | Product requirement |
 |---|---|
 | Router stuck with DNS resolution failure for 10h (`gaierror`, 22,795 lines); 11 remote-control workers died within 17s; app kept showing remote as available | Consecutive upstream connect failures → self-exit; supervisor restarts (launchd KeepAlive). Health view shows remote-worker liveness. |

@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- **Codex capacity refusals no longer appear as exhausted subscription quota.** The observed
+  HTTP 429 `turn_rate_limit_exceeded` response saying "Codex is at capacity" is returned as
+  a retryable overload. It does not cool down the account or borrow a subscription-window
+  reset as its retry deadline; an explicit `Retry-After` is preserved. Actual usage-limit
+  responses retain their existing quota and account-rotation behavior.
 - **Desktop model picker setup is no longer hidden behind a connected routing status.**
   The Status screen reports Claude Code routing and the Desktop picker separately,
   links to picker setup when it is off, and shows when Desktop has not fetched its
