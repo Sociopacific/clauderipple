@@ -82,9 +82,22 @@ function mapHttpError(status: number, text: string): { status: number; body: str
       ? anthropicError(401, "authentication_error", `ChatGPT: ${msg}`)
       : anthropicError(403, "permission_error", `ChatGPT: ${msg}`);
   }
+  if (codexAtCapacity(status, text)) return anthropicError(529, "overloaded_error", `ChatGPT: ${msg}`);
   if (status === 429) return anthropicError(429, "rate_limit_error", `ChatGPT: ${msg}`);
   if (status >= 500) return anthropicError(529, "overloaded_error", `ChatGPT: ${msg}`);
   return anthropicError(400, "invalid_request_error", `ChatGPT: ${msg}`);
+}
+
+/** Observed Codex overload response: HTTP 429, despite the account still having quota/credits. */
+function codexAtCapacity(status: number, text: string): boolean {
+  if (status !== 429) return false;
+  try {
+    const body = JSON.parse(text) as { error?: { code?: unknown; message?: unknown } };
+    return body?.error?.code === "turn_rate_limit_exceeded"
+      && typeof body.error.message === "string" && /\bat capacity\b/i.test(body.error.message);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -808,9 +821,8 @@ export class ChatGptAdapter {
         continue;
       }
 
-      this.noteRateLimits(credential, rateLimitsFromHeaders(upstream.headers));
-
       if (upstream.ok && upstream.body) {
+        this.noteRateLimits(credential, rateLimitsFromHeaders(upstream.headers));
         this.pool.succeed(this.name, credential.id);
         this.activeOwner = credential.ownerId;
         return { kind: "ok", upstream, credential };
@@ -821,6 +833,16 @@ export class ChatGptAdapter {
       const safeText = redactErrorText(text, [...credentialHeaderValues(Object.entries(upstreamHeaders)), credential.accountId]);
       const status = upstream.status;
       this.log.warn(`chatgpt ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
+      if (codexAtCapacity(status, text)) {
+        // Capacity is not spent subscription quota. Keep the account and its cache affinity,
+        // and let the client's bounded overload retry handle this turn. Only Retry-After
+        // applies here: a plan-window reset header is not a capacity-recovery deadline.
+        const retryHeader = upstream.headers.get("retry-after");
+        const waitMs = retryHeader ? retryAfterMs({ "retry-after": retryHeader }) : undefined;
+        return { kind: "refused", status, text: safeText, headers: upstream.headers,
+          ...(waitMs !== undefined ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}) };
+      }
+      this.noteRateLimits(credential, rateLimitsFromHeaders(upstream.headers));
       const credentialRefused = status === 401 || (status === 403 && looksLikeAuth(text));
 
       if (credentialRefused) {
@@ -909,7 +931,8 @@ export class ChatGptAdapter {
     } else {
       const callerAuth = typeof req.headers.authorization === "string" && typeof req.headers["chatgpt-account-id"] === "string";
       // Out of accounts — none signed in, all resting, or the last one just ran out on this turn.
-      const outOfAccounts = sent.kind === "no-account" || sent.kind === "all-resting" || (sent.kind === "refused" && (sent.status === 429 || sent.status === 402));
+      const outOfAccounts = sent.kind === "no-account" || sent.kind === "all-resting"
+        || (sent.kind === "refused" && !codexAtCapacity(sent.status, sent.text) && (sent.status === 429 || sent.status === 402));
       if (outOfAccounts && callerAuth) {
         // Codex's own login, exactly as it sent it. Not refreshed or stored: it is Codex's. A turn
         // token one of our accounts issued means nothing to it.

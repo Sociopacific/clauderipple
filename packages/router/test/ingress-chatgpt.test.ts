@@ -127,6 +127,24 @@ test("Fast alias applies provider tier while preserving an explicit caller tier"
   }
 });
 
+test("capacity keeps Codex's original error and account without falling back to the caller login", async () => {
+  const body = JSON.stringify({ error: { type: "rate_limit_error", code: "turn_rate_limit_exceeded", message: "Codex is at capacity, please try again later" } });
+  behaviour.set("tok-1", { status: 429, headers: { "retry-after": "2" }, body });
+  const before = hits.length;
+  try {
+    const busy = await codexCall("/v1/responses", turn, "sess-capacity");
+    assert.equal(busy.status, 429, "only the Anthropic Messages client needs the overload translation");
+    assert.equal(busy.text, body);
+    assert.equal(busy.headers["retry-after"], "2");
+    assert.deepEqual(hits.slice(before).map((h) => h.headers.authorization), ["Bearer tok-1"]);
+    assert.ok(adapter.accountStatus().every((a) => a.state === "ready"));
+  } finally {
+    behaviour.delete("tok-1");
+  }
+  assert.equal((await codexCall("/v1/responses", turn, "sess-capacity")).status, 200);
+  assert.equal(hits.at(-1)!.headers.authorization, "Bearer tok-1");
+});
+
 test("account 1 at its limit: Codex's same turn is answered on account 2, no sign-out", async () => {
   behaviour.set("tok-1", { status: 429, headers: { "x-codex-primary-used-percent": "100", "x-codex-primary-reset-after-seconds": "1800", "x-codex-primary-window-minutes": "300" }, body: JSON.stringify({ error: { type: "usage_limit_reached", message: "limit" } }) });
   const before = hits.length;
